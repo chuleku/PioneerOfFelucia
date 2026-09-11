@@ -137,6 +137,37 @@ graph LR
 - 매 프레임 렌더러/파티클 가시성만 토글
 - 동일 대상 중복 없음, 최대 3개의 파티클 재생
 
+### 5. 데이터 주도 적 시스템 & CSV·지역화 파이프라인
+
+**데이터 관리**
+- `DataTableManager`가 초기화 시점에 CSV 기반 데이터테이블(`EnemyTable`, `StringTable`, `WaveTable` 등)을 한 번씩 로드해 정적 딕셔너리로 캐싱
+- 이후 런타임 어디서든 `DataTableManager.Get<T>(id)`로 접근 — 적 하나 추가/수정은 CSV 한 줄로 끝나고 코드는 그대로
+
+**다중 특성(비트플래그) 시스템**
+- `EnemyAttribute`를 `[Flags]` enum으로 설계해 은신·공중·저지불가 등 9종에 비트를 하나씩 배정
+-  데이터 테이블(CSV)의 Attribute 칸에 `Fly|Cloaking`처럼 `|` 또는 `;`로 여러 값을 적으면 `ParseAttribute`가 토큰 단위로 잘라 OR 연산으로 조합
+-  조합마다 새로 작성하는거 대신 `EnemyBase`가 이 비트플래그를  `IsFly`/`IsCloaking`/`IsBerserk`같은 읽기 전용으로 프로퍼티로 노출해 필요한 비트만 보고 각자 역활을 수행합니다.
+
+**로컬라이즈**
+- 열거형 비트플래그로 Kr,En,Jp로 나누어 Dropdown으로 바꾼 언어에 맞게 `StringTable`에서 읽어 보여줍니다.`PlayerPrefs` 에 자동 저장/복원 지원합니다.
+- `DataTableManager`를 통한 중앙 집권식 CSV 데이터 관리 (`StringTable`, `EnemyTable`, `WaveTable`, `PortalTable`, `DebuffTable` 등).
+- `PlayerPrefs` 내 언어 데이터 손상 시 한국어(`Language.Kr`)로 안전하게 Fallback 처리합니다.
+
+**일차·지역 스케일링과의 연결**
+- `EnemyStatScaling`이 CSV의 기초 스탯에 일차/해금 지역 수 배율을 곱해 최종 스폰 값을 계산합니다.
+- 같은 계산식을 스테이지 정보 툴팁(`StageInfoView`)에도 그대로 재사용해, 미리보기로 보여주는 값과 실제 스폰 값이 항상 일치하도록 보장합니다.
+```mermaid
+graph LR
+    CSV[EnemyTable.csv] --> DTM[DataTableManager]
+    DTM --> LOAD[EnemyStatLoader.Load]
+    LOAD --> APPLY[EnemyBase.ApplyData]
+    APPLY -->|Attribute 칸 파싱| ATTR[ParseAttribute<br/>비트플래그 조합]
+    APPLY -->|일차·지역 배율| SCALE[EnemyStatScaling]
+    APPLY -->|이름 키 조회| STR[StringTable.Get]
+    STR --> UI[적 이름 · 보스 UI 텍스트]
+    ATTR --> BEHAV[IsFly / IsCloaking 등<br/>이동 · 전투 분기]
+```
+
 ---
 
 ## 아키텍처
@@ -153,12 +184,12 @@ graph TD
         LANE[EnemyLanes + RouteConfig<br/>저작 경로 → 레인]
         SAVE[SaveManager<br/>암호화 자동 저장]
     end
-    subgraph 적["적 · 웨이브 (팀원)"]
+    subgraph 적["적 · 웨이브 (담당)"]
         WS[WaveSpawner]
         EB[EnemyBase<br/>특성 9종 비트플래그]
         DT[DataTable<br/>CSV 파이프라인]
     end
-    subgraph 영웅["영웅 전투 · 성장 (담당)"]
+    subgraph 영웅["영웅 전투 · 성장 (팀원)"]
         HERO[Hero + FSM<br/>Idle/Attack/Death/Stun/Skill]
         ATK[AttackDataSO<br/>delivery ⟂ executor]
         TRAIT[HeroTrait × N]
