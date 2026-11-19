@@ -26,14 +26,9 @@ public class BalanceHeroAssets
         RangedCost.Count > 0 && ClassConfig != null && TierConfig != null;
 }
 
-// MainScene을 보이지 않는 미리보기 씬으로 잠깐 열어 영웅 관련 값을 읽고 바로 닫는다.
-// 이미 에디터에 열려 있으면 그 씬을 그대로 읽고 닫지 않는다. 씬은 수정·저장하지 않는다.
+// MainScene(BalanceSceneReader가 열어 준 씬)에서 영웅 관련 값을 읽는다.
 public static class BalanceHeroSource
 {
-    private const string MainScenePath = "Assets/MainScene/MainScene.unity";
-    private const string OpenSceneNote = "열려 있는 MainScene에서 읽음";
-    private const string PreviewSceneNote = "MainScene(미리보기)에서 읽음";
-
     // 런타임 필드 이름. 인스펙터 전용(private) 값이라 SerializedObject로만 읽을 수 있다.
     private const string MeleeIconField = "meleeIcon";
     private const string RangedIconField = "rangedIcon";
@@ -46,7 +41,8 @@ public static class BalanceHeroSource
     private const string TierWeightsField = "tierWeights";
     private const string DatasField = "datas";
 
-    public static BalanceHeroAssets Load()
+    // 씬과 상관없는 에셋(강화 설정, 영웅 스탯)만 채운 빈 묶음. 씬 값은 ReadScene이 채운다.
+    public static BalanceHeroAssets CreateWithAssets()
     {
         var assets = new BalanceHeroAssets
         {
@@ -57,30 +53,11 @@ public static class BalanceHeroSource
         {
             assets.StatEntries[entry.HeroData] = entry;
         }
-
-        Scene openScene = SceneManager.GetSceneByPath(MainScenePath);
-        if (openScene.IsValid() && openScene.isLoaded)
-        {
-            ReadScene(openScene, assets);
-            assets.SourceNote = OpenSceneNote;
-            return assets;
-        }
-
-        Scene preview = EditorSceneManager.OpenPreviewScene(MainScenePath);
-        try
-        {
-            ReadScene(preview, assets);
-            assets.SourceNote = PreviewSceneNote;
-        }
-        finally
-        {
-            EditorSceneManager.ClosePreviewScene(preview);
-        }
         return assets;
     }
 
     // FindObjectsOfType은 미리보기 씬을 뒤지지 않으므로 루트부터 직접 훑는다.
-    private static void ReadScene(Scene scene, BalanceHeroAssets assets)
+    public static void ReadScene(Scene scene, BalanceHeroAssets assets)
     {
         HeroSetPanel setPanel = null;
         HeroCreateManager createManager = null;

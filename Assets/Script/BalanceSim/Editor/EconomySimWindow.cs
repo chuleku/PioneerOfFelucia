@@ -94,6 +94,7 @@ public class EconomySimWindow : EditorWindow
 
     private EconomySimAssets assets;
     private BalanceHeroAssets heroAssets;
+    private BalanceBattleAssets battleAssets;
     private readonly EconomySimTitleInput titleInput = new();
     private readonly EconomySimFeliumInput feliumInput = new();
     private readonly Dictionary<(HeroData, int), HeroSimResult> powerCache = new();
@@ -103,6 +104,9 @@ public class EconomySimWindow : EditorWindow
     private int seedCount = DefaultSeedCount;
     private int chartMode;
     private bool titleFoldout;
+    private bool waveFoldout;
+    private int waveDay = 1;
+    private Vector2 waveScroll;
     private bool dirty;
     private string[] strategyNames = Array.Empty<string>();
     private string poolNote = string.Empty;
@@ -124,7 +128,13 @@ public class EconomySimWindow : EditorWindow
     private void ReloadAssets()
     {
         assets = EconomySimSource.Load();
-        heroAssets = BalanceHeroSource.Load();
+        heroAssets = BalanceHeroSource.CreateWithAssets();
+        battleAssets = BalanceBattleSource.CreateWithTables();
+        heroAssets.SourceNote = BalanceSceneReader.Read(scene =>
+        {
+            BalanceHeroSource.ReadScene(scene, heroAssets);
+            BalanceBattleSource.ReadScene(scene, battleAssets);
+        });
         powerCache.Clear();
         poolNote = BuildPoolNote();
         Rebuild();
@@ -146,6 +156,7 @@ public class EconomySimWindow : EditorWindow
         EditorGUILayout.LabelField(ConditionNote, EditorStyles.wordWrappedMiniLabel);
         EditorGUILayout.LabelField(poolNote, EditorStyles.wordWrappedMiniLabel);
         if (dirty) EditorGUILayout.HelpBox(DirtyNote, MessageType.Info);
+        BalanceWavePanel.Draw(battleAssets, ref waveFoldout, ref waveDay, ref waveScroll, MaximumDays);
         DrawComparison();
         DrawChart();
         DrawTable();
