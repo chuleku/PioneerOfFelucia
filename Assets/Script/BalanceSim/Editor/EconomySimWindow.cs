@@ -19,6 +19,8 @@ public class EconomySimWindow : EditorWindow
     private const string SeedLabel = "시드";
     private const string SeedCountLabel = "반복(시드 수)";
     private const string ChartModeLabel = "그래프";
+    private const string PerfectNightLabel = "무피해 밤 비율(%)";
+    private const string KillBossLabel = "보스 처치(10일마다 +5)";
     private const string TitleFoldoutLabel = "타이틀 강화 해금 단계";
     private const string ConstructDiscountLabel = "건설비 할인";
     private const string UpgradeDiscountLabel = "강화비 할인";
@@ -30,7 +32,7 @@ public class EconomySimWindow : EditorWindow
     private const string DirtyNote = "입력이 바뀌었습니다 — 실행을 누르면 반영됩니다.";
     private const string CompareHeaderFormat = "전략 비교 ({0}일차, 시드 {1}개 평균)";
     private const string ConditionNote =
-        "전투·배치 없음(3단계) · 전투력 = 보유 영웅 전원의 초당 피해·체력 합계(방어 0) · 특수 자원(교역) 미반영 · " +
+        "전투·배치 없음(3단계) - 펠리움 수입은 위 가정으로 계산 · 전투력 = 보유 영웅 전원의 초당 피해·체력 합계(방어 0) · 특수 자원(교역) 미반영 · " +
         "지역은 1번에서 시작해 10일마다 하나씩(11·21일차~) 열림 · 생산은 밤이 끝날 때 지급 · 자원 칸은 낮 끝 보유량(+다음 날 수입)";
     private const string MissingAssetsNote =
         "경제 에셋을 찾지 못했습니다 — ProductionValue·HouseConfig·ProductionEconomyConfig·ResourcesManager/CitizenManager/BasePanel 프리팹을 확인하세요.";
@@ -58,6 +60,7 @@ public class EconomySimWindow : EditorWindow
     private const float HeroWidth = 150f;
     private const float PowerWidth = 120f;
     private const float BlockWidth = 130f;
+    private const float FeliumWidth = 90f;
     private const float CompareNumberWidth = 150f;
 
     private static readonly Color[] ResourceColors =
@@ -85,12 +88,14 @@ public class EconomySimWindow : EditorWindow
         public float HpMean;
         public float GoldMean;
         public int FacilityCount;
+        public float FeliumUsed;   // 한 판 동안 교환에 쓴 펠리움(시드 평균)
         public readonly Dictionary<string, int> BlockDays = new(); // 막힌 이유별 일수(시드 전체 합)
     }
 
     private EconomySimAssets assets;
     private BalanceHeroAssets heroAssets;
     private readonly EconomySimTitleInput titleInput = new();
+    private readonly EconomySimFeliumInput feliumInput = new();
     private readonly Dictionary<(HeroData, int), HeroSimResult> powerCache = new();
     private int dayCount = DefaultDays;
     private int strategyIndex;
@@ -161,6 +166,8 @@ public class EconomySimWindow : EditorWindow
         dayCount = EditorGUILayout.IntSlider(DaysLabel, dayCount, MinimumDays, MaximumDays);
         seed = EditorGUILayout.TextField(SeedLabel, seed);
         seedCount = EditorGUILayout.IntSlider(SeedCountLabel, seedCount, 1, MaximumSeedCount);
+        feliumInput.PerfectNightPercent = EditorGUILayout.IntSlider(PerfectNightLabel, feliumInput.PerfectNightPercent, 0, 100);
+        feliumInput.KillBoss = EditorGUILayout.Toggle(KillBossLabel, feliumInput.KillBoss);
 
         titleFoldout = EditorGUILayout.Foldout(titleFoldout, TitleFoldoutLabel, true);
         if (titleFoldout)
@@ -206,7 +213,7 @@ public class EconomySimWindow : EditorWindow
             var summary = new StrategySummary { Name = strategy.Name };
             for (int run = 0; run < seedCount; run++)
             {
-                List<EconomySimDayLog> result = EconomySimRunner.Run(assets, heroAssets, titleInput, strategy, dayCount,
+                List<EconomySimDayLog> result = EconomySimRunner.Run(assets, heroAssets, titleInput, feliumInput, strategy, dayCount,
                     RunSeed(run), false, powerCache);
                 Accumulate(summary, result);
             }
@@ -222,7 +229,7 @@ public class EconomySimWindow : EditorWindow
         if (!AssetsReady) return;
         List<IEconomySimStrategy> strategies = RuleEconomyStrategy.CreatePresets();
         strategyIndex = Mathf.Clamp(strategyIndex, 0, strategies.Count - 1);
-        logs = EconomySimRunner.Run(assets, heroAssets, titleInput, strategies[strategyIndex], dayCount, RunSeed(0), true, powerCache);
+        logs = EconomySimRunner.Run(assets, heroAssets, titleInput, feliumInput, strategies[strategyIndex], dayCount, RunSeed(0), true, powerCache);
     }
 
     private string RunSeed(int run) => $"{seed}-{run}";
@@ -240,6 +247,7 @@ public class EconomySimWindow : EditorWindow
 
         foreach (EconomySimDayLog log in result)
         {
+            summary.FeliumUsed += log.FeliumUsed;
             if (log.HeroBlock == null) continue;
             summary.BlockDays.TryGetValue(log.HeroBlock, out int days);
             summary.BlockDays[log.HeroBlock] = days + 1;
@@ -253,6 +261,7 @@ public class EconomySimWindow : EditorWindow
         summary.HpMean /= seedCount;
         summary.GoldMean /= seedCount;
         summary.FacilityCount /= seedCount;
+        summary.FeliumUsed /= seedCount;
     }
 
     // (티어, 종류)별 생성·합성 후보 수. 같은 영웅 3개가 모여야 합성되므로 후보가 많을수록 합성이 드물다.
@@ -289,6 +298,7 @@ public class EconomySimWindow : EditorWindow
             GUILayout.Label("체력 합계 평균", GUILayout.Width(CompareNumberWidth));
             GUILayout.Label("금 낮 끝", GUILayout.Width(FacilityWidth));
             GUILayout.Label("시설", GUILayout.Width(BlockWidth));
+            GUILayout.Label("펠리움 사용", GUILayout.Width(FeliumWidth));
             GUILayout.Label("영웅 생성이 막힌 날(이유별, 시드 합)", GUILayout.ExpandWidth(true));
         }
         foreach (StrategySummary summary in comparison)
@@ -301,6 +311,7 @@ public class EconomySimWindow : EditorWindow
                 GUILayout.Label($"{summary.HpMean:N0}", GUILayout.Width(CompareNumberWidth));
                 GUILayout.Label($"{summary.GoldMean:N0}", GUILayout.Width(FacilityWidth));
                 GUILayout.Label($"{summary.FacilityCount}", GUILayout.Width(BlockWidth));
+                GUILayout.Label($"{summary.FeliumUsed:N1}", GUILayout.Width(FeliumWidth));
                 GUILayout.Label(BlockSummary(summary.BlockDays), EditorStyles.miniLabel, GUILayout.ExpandWidth(true));
             }
         }
@@ -388,6 +399,7 @@ public class EconomySimWindow : EditorWindow
             GUILayout.Label("시설+집 / 슬롯", GUILayout.Width(FacilityWidth));
             GUILayout.Label("영웅 근/원 · T1~T4", GUILayout.Width(HeroWidth));
             GUILayout.Label("피해 / 체력", GUILayout.Width(PowerWidth));
+            GUILayout.Label("펠리움 보유(+획득/-사용)", GUILayout.Width(FeliumWidth + 40f));
             GUILayout.Label("막힘", GUILayout.Width(BlockWidth));
             GUILayout.Label("행동", GUILayout.ExpandWidth(true));
         }
@@ -407,6 +419,7 @@ public class EconomySimWindow : EditorWindow
                 GUILayout.Label($"{FacilityTotal(log)}+{log.HouseCount} / {log.UsedSlots}/{log.TotalSlots}", GUILayout.Width(FacilityWidth));
                 GUILayout.Label($"{log.MeleeCount}/{log.RangedCount} · {TierSummary(log)}", GUILayout.Width(HeroWidth));
                 GUILayout.Label($"{log.PowerDps:N1} / {log.PowerHp:N0}", GUILayout.Width(PowerWidth));
+                GUILayout.Label($"{log.FeliumEnd} (+{log.FeliumGained}/-{log.FeliumUsed})", GUILayout.Width(FeliumWidth + 40f));
                 GUILayout.Label(log.HeroBlock ?? "-", GUILayout.Width(BlockWidth));
                 GUILayout.Label(ActionSummary(log), EditorStyles.miniLabel, GUILayout.ExpandWidth(true));
             }
@@ -461,7 +474,7 @@ public class EconomySimWindow : EditorWindow
         foreach (string name in ResourceNames) builder.Append($",{name},{name}Income,{name}AfterPayout,{name}Spent,{name}Facilities");
         builder.Append(",Houses,Citizens,MaxCitizens,Workers,HeroCitizens,OpenWorkerSlots,UsedSlots,TotalSlots,Melee,Ranged");
         for (int tier = 1; tier <= EconomySimRunner.MaxHeroTier; tier++) builder.Append($",T{tier}");
-        builder.AppendLine(",CreatedToday,MeleeClassLv,RangedClassLv,Dps,Hp,HeroBlock,Actions");
+        builder.AppendLine(",CreatedToday,MeleeClassLv,RangedClassLv,Dps,Hp,Felium,FeliumGained,FeliumUsed,HeroBlock,Actions");
 
         foreach (EconomySimDayLog log in logs)
         {
@@ -473,7 +486,7 @@ public class EconomySimWindow : EditorWindow
             builder.Append($",{log.HouseCount},{log.CurrentCitizen},{log.MaxCitizen},{log.AssignedWorkers},{log.HeroCitizens}," +
                 $"{log.OpenWorkerSlots},{log.UsedSlots},{log.TotalSlots},{log.MeleeCount},{log.RangedCount}");
             for (int tier = 1; tier <= EconomySimRunner.MaxHeroTier; tier++) builder.Append($",{log.HeroTierCounts[tier]}");
-            builder.AppendLine($",{log.CreatedToday},{log.MeleeClassLevel},{log.RangedClassLevel},{log.PowerDps:F1},{log.PowerHp:F0}," +
+            builder.AppendLine($",{log.CreatedToday},{log.MeleeClassLevel},{log.RangedClassLevel},{log.PowerDps:F1},{log.PowerHp:F0},{log.FeliumEnd},{log.FeliumGained},{log.FeliumUsed}," +
                 $"{log.HeroBlock},\"{ActionSummary(log)}\"");
         }
 

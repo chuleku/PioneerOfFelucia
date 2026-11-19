@@ -79,9 +79,49 @@ public class RuleEconomyStrategy : IEconomySimStrategy
         for (int step = 0; step < MaxActionsPerDay; step++)
         {
             if (TryOneStep(world, heroes, log)) continue;
-            if (!rebalance || rebalancedToday || !TryRebalance(world, heroes, log)) return;
-            rebalancedToday = true;
+            if (rebalance && !rebalancedToday && TryRebalance(world, heroes, log))
+            {
+                rebalancedToday = true;
+                continue;
+            }
+            if (!TrySpendFelium(world, heroes, log)) return;
         }
+    }
+
+    // 더 할 게 없을 때 펠리움 1개를 막힌 자원으로 바꾼다(+300). 영웅을 쓰는 전략은 영웅 다음 1명에 처음 모자란 자원,
+    // 영웅이 막히지 않았거나 경제만 하는 전략은 금을 뺀 자원 중 가장 적은 것(금은 영웅에만 쓰여 경제엔 소용없다).
+    // 인구에만 막혔으면 자원을 받아도 소용없으니 쓰지 않는다.
+    private bool TrySpendFelium(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
+    {
+        if (world.Resources.Special <= 0) return false;
+
+        ProductionType? target = null;
+        if (UsesHeroes && HasEveryFacility(world))
+        {
+            if (heroes.GetBlockReason(OccupantKind.MeleeHero) == BalanceBlockReason.Population) return false;
+            target = heroes.FirstMissingResource(OccupantKind.MeleeHero);
+        }
+        target ??= LowestNonGold(world);
+
+        if (!world.TryTrade(target.Value)) return false;
+        log.Actions.Add($"펠리움→{target.Value}");
+        log.FeliumUsed++;
+        return true;
+    }
+
+    private static ProductionType LowestNonGold(EconomySimWorld world)
+    {
+        ProductionType pick = ProductionType.Wood;
+        int lowest = int.MaxValue;
+        foreach (ProductionType type in world.BuildableTypes)
+        {
+            if (type == ProductionType.Gold) continue;
+            int stock = world.Resources.GetAmount(type);
+            if (stock >= lowest) continue;
+            lowest = stock;
+            pick = type;
+        }
+        return pick;
     }
 
     // 슬롯이 꽉 찼는데 영웅이 어떤 자원에 막혀 있고 다른 자원은 많이 남으면, 남는 쪽 시설 하나를 철거해

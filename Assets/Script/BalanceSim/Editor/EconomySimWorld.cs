@@ -95,6 +95,20 @@ public class EconomySimWorld : IDisposable
         return false;
     }
 
+    // 펠리움 1개를 써서 원하는 자원을 tradeAmount(프리팹 300)만큼 받는다 - ResourcesManager.TradeResource 그대로.
+    // TradeResource는 보유량을 검사하지 않아(버튼이 막는다) 여기서 먼저 확인한다.
+    public bool TryTrade(ProductionType type)
+    {
+        if (Resources.Special <= 0) return false;
+        Resources.TradeResource(type);
+        return true;
+    }
+
+    public void GrantSpecial(int amount)
+    {
+        for (int count = 0; count < amount; count++) Resources.GetSpecial();
+    }
+
     public bool TryBuildHouse()
     {
         if (!TryBuildInFreeSlot(houseOption, out object built)) return false;

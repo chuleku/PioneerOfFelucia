@@ -34,6 +34,11 @@ public class EconomySimDayLog
     public float PowerDps;
     public float PowerHp;
 
+    // 펠리움(특수 자원)
+    public int FeliumGained;   // 이 밤이 끝나며 받은 양(무피해 +1, 보스 +5)
+    public int FeliumUsed;     // 낮 동안 교환에 쓴 개수
+    public int FeliumEnd;      // 지급 후 보유량
+
     public int HeroCount => MeleeCount + RangedCount;
 }
 
@@ -49,6 +54,13 @@ public class EconomySimTitleInput
     public int HeroUpgradeDiscount;
 }
 
+// 전투가 아직 없어서(3단계) 펠리움 수입은 가정으로 넣는다.
+public class EconomySimFeliumInput
+{
+    public int PerfectNightPercent = 100; // 본진 피해 없이 넘긴 밤의 비율(시드별로 날마다 뽑는다)
+    public bool KillBoss = true;          // 1번 지역 10일마다 나오는 보스(DeathAttacker)를 잡는다고 볼지
+}
+
 // 낮(봇 행동) -> 밤(전투 없음) -> 생산 지급을 하루 단위로 반복한다.
 public static class EconomySimRunner
 {
@@ -61,10 +73,17 @@ public static class EconomySimRunner
     private const int RegionUnlockInterval = 10;
     // 0일차는 튜토리얼이 끝나면 자원을 시작값으로 되돌리므로 1일차부터 돈다.
     private const int FirstDay = 1;
+    // EnviromentManager: 무피해(perfactDefence)로 밤을 넘기면 아침에 GetSpecial 1번.
+    private const int PerfectNightFelium = 1;
+    // EnemyBase.BossSpecialDrop. 보스는 WaveSpawner가 1번 지역 currentStage % 10 == 0인 밤에 낸다.
+    private const int BossFelium = 5;
+    private const int BossInterval = 10;
+    private const int PercentScale = 100;
+    private const string NightSeedSuffix = ":night";
 
     // powerEveryDay가 false면 마지막 날만 전투력을 계산한다(전략 비교용 반복 실행을 가볍게).
     public static List<EconomySimDayLog> Run(EconomySimAssets assets, BalanceHeroAssets heroAssets, EconomySimTitleInput title,
-        IEconomySimStrategy strategy, int dayCount, string seed, bool powerEveryDay,
+        EconomySimFeliumInput felium, IEconomySimStrategy strategy, int dayCount, string seed, bool powerEveryDay,
         Dictionary<(HeroData, int), HeroSimResult> powerCache)
     {
         var logs = new List<EconomySimDayLog>(dayCount);
@@ -88,6 +107,8 @@ public static class EconomySimRunner
             {
                 log.Income[(int)type] += amount;
             }
+            log.FeliumGained = NightFelium(felium, seed, day);
+            world.GrantSpecial(log.FeliumGained);
 
             for (int index = 0; index < ResourceTypeCount; index++)
             {
@@ -99,6 +120,16 @@ public static class EconomySimRunner
             logs.Add(log);
         }
         return logs;
+    }
+
+    // 이 밤이 끝나며 받는 펠리움. 무피해 여부는 시드·일차로 정해 같은 입력이면 항상 같은 결과가 나온다.
+    private static int NightFelium(EconomySimFeliumInput felium, string seed, int day)
+    {
+        int gained = 0;
+        var rng = new System.Random(GameSeeding.Derive(seed + NightSeedSuffix, day));
+        if (rng.Next(PercentScale) < felium.PerfectNightPercent) gained += PerfectNightFelium;
+        if (felium.KillBoss && day % BossInterval == 0) gained += BossFelium;
+        return gained;
     }
 
     // PlayerPrefs의 실제 타이틀 진행도를 쓰지 않도록 생성 직후 해금 목록을 덮어쓴다.
@@ -154,6 +185,7 @@ public static class EconomySimRunner
         log.OpenWorkerSlots = world.OpenWorkerSlots;
         log.TotalSlots = world.TotalSlots;
         log.UsedSlots = world.TotalSlots - world.FreeSlots;
+        log.FeliumEnd = world.Resources.Special;
     }
 
     private static void FillHeroState(BalanceHeroWorld heroes, EconomySimDayLog log, bool withPower)
