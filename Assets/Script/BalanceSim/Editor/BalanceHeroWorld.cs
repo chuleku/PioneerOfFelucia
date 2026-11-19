@@ -208,20 +208,33 @@ public class BalanceHeroWorld
         float hp = 0f;
         foreach (BalanceHero hero in Roster)
         {
-            if (!assets.StatEntries.TryGetValue(hero.Data, out HeroSimEntry entry)) continue;
-            int classLevel = ClassUpgrades.GetLevel(hero.Data.HeroType);
-            var key = (hero.Data, classLevel);
-            if (!powerCache.TryGetValue(key, out HeroSimResult result))
-            {
-                var input = new HeroSimInput { ClassUpgradeCount = classLevel };
-                result = HeroSimBuilder.BuildResult(entry, assets.TierConfig, assets.ClassConfig, input, 0f, 0, 0f);
-                powerCache[key] = result;
-            }
+            HeroSimResult result = StatsOf(hero);
+            if (result == null) continue;
             dps += result.DamagePerSecond;
             hp += result.MaxHp;
         }
         return (dps, hp);
     }
+
+    // 지금 직업 강화 단계 기준 이 영웅의 최종 스탯(HeroSimBuilder 결과, 방어 0 기준). 스탯 데이터가 없는 영웅이면 null.
+    public HeroSimResult StatsOf(BalanceHero hero)
+    {
+        HeroSimEntry entry = EntryOf(hero);
+        if (entry == null) return null;
+        int classLevel = ClassUpgrades.GetLevel(hero.Data.HeroType);
+        var key = (hero.Data, classLevel);
+        if (!powerCache.TryGetValue(key, out HeroSimResult result))
+        {
+            var input = new HeroSimInput { ClassUpgradeCount = classLevel };
+            result = HeroSimBuilder.BuildResult(entry, assets.TierConfig, assets.ClassConfig, input, 0f, 0, 0f);
+            powerCache[key] = result;
+        }
+        return result;
+    }
+
+    // 영웅 시뮬레이터가 프리팹에서 뽑아 둔 평타 패턴·트레잇 정보. 없으면 null.
+    public HeroSimEntry EntryOf(BalanceHero hero) =>
+        assets.StatEntries.TryGetValue(hero.Data, out HeroSimEntry entry) ? entry : null;
 
     // HeroCreateManager.TryRollHero: 지역 진행도 행의 가중치로 티어를 뽑고, 그 티어+종류 중 하나를 고른다.
     // 그 티어 데이터가 없으면 한 티어씩 내려가며 다시 찾는다. 시드는 GameManager.ConsumeHeroDraw처럼 종류별 순번.

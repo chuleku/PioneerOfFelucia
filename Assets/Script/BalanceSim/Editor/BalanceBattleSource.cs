@@ -28,6 +28,9 @@ public class BalanceBattleAssets
     public readonly WaveTable Waves = new();
     public readonly EnemyTable Enemies = new();
     public readonly PortalTable Portals = new();
+    // 스킬·버프·장판 등 시뮬에 없는 영웅 능력을 실제 플레이 결과에 맞춰 메우는 보정(%). 창에서 입력한다.
+    public int HeroDamagePercent = 100;
+    public int HeroHpPercent = 100;
     public int BaseHp;                                              // GameManager 프리팹의 hp(타이틀 강화 전)
     public readonly List<BaseUpgradeData> BaseHpUpgrades = new();   // GameManager.hpUpgrades - 타이틀 강화로 늘어나는 본진 체력
 

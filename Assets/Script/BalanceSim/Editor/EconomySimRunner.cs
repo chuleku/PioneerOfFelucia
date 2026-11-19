@@ -39,6 +39,20 @@ public class EconomySimDayLog
     public int FeliumUsed;     // 낮 동안 교환에 쓴 개수
     public int FeliumEnd;      // 지급 후 보유량
 
+    // 전투(3단계, 전투를 켰을 때만)
+    public bool HasBattle;
+    public int BaseHp;            // 밤이 끝난 뒤 본진 체력
+    public int EnemySpawned;
+    public int EnemyLeaked;
+    public int BaseDamage;
+    public bool PerfectNight;
+    public bool BossKilled;
+    public bool GameOver;
+    public int Placed;
+    public int Inventory;
+    public int HeroDeaths;
+    public string BattleNote;
+
     public int HeroCount => MeleeCount + RangedCount;
 }
 
@@ -52,11 +66,13 @@ public class EconomySimTitleInput
     public int MaxCitizen;
     public int HeroCreateDiscount;
     public int HeroUpgradeDiscount;
+    public int BaseHp;
 }
 
-// 전투가 아직 없어서(3단계) 펠리움 수입은 가정으로 넣는다.
+// 펠리움 수입. 전투를 켜면 실제 밤 결과(무피해·보스 처치)로 정하고, 끄면 아래 가정값을 쓴다.
 public class EconomySimFeliumInput
 {
+    public bool UseBattle = true;         // 3단계 전투 결과로 펠리움·본진 체력을 정한다
     public int PerfectNightPercent = 100; // 본진 피해 없이 넘긴 밤의 비율(시드별로 날마다 뽑는다)
     public bool KillBoss = true;          // 1번 지역 10일마다 나오는 보스(DeathAttacker)를 잡는다고 볼지
 }
@@ -83,14 +99,17 @@ public static class EconomySimRunner
 
     // powerEveryDay가 false면 마지막 날만 전투력을 계산한다(전략 비교용 반복 실행을 가볍게).
     public static List<EconomySimDayLog> Run(EconomySimAssets assets, BalanceHeroAssets heroAssets, EconomySimTitleInput title,
-        EconomySimFeliumInput felium, IEconomySimStrategy strategy, int dayCount, string seed, bool powerEveryDay,
-        Dictionary<(HeroData, int), HeroSimResult> powerCache)
+        EconomySimFeliumInput felium, BalanceBattleAssets battle, IEconomySimStrategy strategy, int dayCount, string seed,
+        bool powerEveryDay, Dictionary<(HeroData, int), HeroSimResult> powerCache)
     {
         var logs = new List<EconomySimDayLog>(dayCount);
-        UpgradeState upgradeState = BuildUpgradeState(assets, heroAssets, title);
+        UpgradeState upgradeState = BuildUpgradeState(assets, heroAssets, battle, title);
         using var world = new EconomySimWorld(assets, upgradeState);
         var heroes = new BalanceHeroWorld(heroAssets, world, upgradeState, seed, powerCache);
         int lastDay = FirstDay + dayCount - 1;
+        bool useBattle = felium.UseBattle && battle != null && battle.IsValid;
+        // GameManager.Construct: 프리팹 hp + 타이틀 hpUpgrades. 밤마다 깎이고 회복되지 않는다.
+        int baseHp = useBattle ? battle.BaseHp + (int)upgradeState.GetTotalEffect(battle.BaseHpUpgrades) : 0;
 
         for (int day = FirstDay; day <= lastDay; day++)
         {
@@ -107,7 +126,7 @@ public static class EconomySimRunner
             {
                 log.Income[(int)type] += amount;
             }
-            log.FeliumGained = NightFelium(felium, seed, day);
+            log.FeliumGained = useBattle ? BattleNight(battle, heroes, day, seed, ref baseHp, log) : NightFelium(felium, seed, day);
             world.GrantSpecial(log.FeliumGained);
 
             for (int index = 0; index < ResourceTypeCount; index++)
@@ -116,10 +135,34 @@ public static class EconomySimRunner
                 log.DayEnd[index] = afterDay[index];
             }
             FillState(world, log);
-            FillHeroState(heroes, log, powerEveryDay || day == lastDay);
+            FillHeroState(heroes, log, powerEveryDay || day == lastDay || log.GameOver);
             logs.Add(log);
+            if (log.GameOver) break;
         }
         return logs;
+    }
+
+    // 밤 전투를 돌려 본진 체력을 깎고, 그 결과로 받을 펠리움을 돌려준다(무피해 +1, 보스 처치 +5).
+    // NightState.Exit: 밤 시작 때와 본진 체력이 같으면 무피해. 보스가 닿거나 체력이 0이 되면 패배.
+    private static int BattleNight(BalanceBattleAssets battle, BalanceHeroWorld heroes, int day, string seed, ref int baseHp, EconomySimDayLog log)
+    {
+        BalanceNightResult night = BalanceBattle.RunNight(battle, heroes, day, seed);
+        baseHp = night.BossLeaked ? 0 : Mathf.Max(0, baseHp - night.BaseDamage);
+
+        log.HasBattle = true;
+        log.BaseHp = baseHp;
+        log.EnemySpawned = night.Spawned;
+        log.EnemyLeaked = night.Leaked;
+        log.BaseDamage = night.BaseDamage;
+        log.PerfectNight = night.BaseDamage == 0 && !night.BossLeaked;
+        log.BossKilled = night.BossKilled;
+        log.GameOver = baseHp <= 0;
+        log.Placed = night.Placed;
+        log.Inventory = night.Inventory;
+        log.HeroDeaths = night.HeroDeaths;
+        log.BattleNote = string.Join(" · ", night.RegionNotes) + (night.TimedOut ? " · 시간 초과" : string.Empty)
+            + (night.BossNote != null ? $" · {night.BossNote}" : string.Empty);
+        return (log.PerfectNight ? PerfectNightFelium : 0) + (night.BossKilled ? BossFelium : 0);
     }
 
     // 이 밤이 끝나며 받는 펠리움. 무피해 여부는 시드·일차로 정해 같은 입력이면 항상 같은 결과가 나온다.
@@ -134,7 +177,8 @@ public static class EconomySimRunner
 
     // PlayerPrefs의 실제 타이틀 진행도를 쓰지 않도록 생성 직후 해금 목록을 덮어쓴다.
     // Unlock/AddPoints는 PlayerPrefs에 저장해 버리므로 부르지 않는다.
-    private static UpgradeState BuildUpgradeState(EconomySimAssets assets, BalanceHeroAssets heroAssets, EconomySimTitleInput title)
+    private static UpgradeState BuildUpgradeState(EconomySimAssets assets, BalanceHeroAssets heroAssets, BalanceBattleAssets battle,
+        EconomySimTitleInput title)
     {
         var ids = new List<string>();
         AddFirstIds(ids, assets.EconomyConfig.ConstructCostUpgrades, title.ConstructDiscount);
@@ -144,6 +188,7 @@ public static class EconomySimRunner
         AddFirstIds(ids, assets.MaxCitizenUpgrades, title.MaxCitizen);
         AddFirstIds(ids, heroAssets.CreateCostUpgrades, title.HeroCreateDiscount);
         AddFirstIds(ids, heroAssets.ClassConfig.UpgradeCostUpgrades, title.HeroUpgradeDiscount);
+        if (battle != null) AddFirstIds(ids, battle.BaseHpUpgrades, title.BaseHp);
 
         var state = new UpgradeState();
         state.Restore(new UpgradeSaveData { unlockedIds = ids });

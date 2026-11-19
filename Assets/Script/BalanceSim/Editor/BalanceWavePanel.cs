@@ -93,9 +93,17 @@ public static class BalanceWavePanel
         }
         int airRoutes = 0;
         foreach (List<List<Vector2Int>> routes in region.AirRoutes.Values) airRoutes += routes.Count;
+        // 근접 영웅은 적이 지나가는 칸에 서야 막는다(BlockCalc). 이 수가 0이면 저지가 한 번도 일어나지 않는다.
+        var laneTiles = new HashSet<Vector2Int>();
+        foreach (List<Vector2Int> lane in region.GroundLanes) laneTiles.UnionWith(lane);
+        int meleeOnLane = 0;
+        foreach (Vector2Int tile in region.MeleeTiles)
+        {
+            if (laneTiles.Contains(tile)) meleeOnLane++;
+        }
 
         string laneText = region.GroundLanes.Count > 0 ? $"지상 레인 {region.GroundLanes.Count}개({shortest}~{longest}칸)" : "지상 레인 없음";
-        return $"{laneText} · 공중 경로 {airRoutes}개 · 근접 배치 칸 {region.MeleeTiles.Count} · 원거리 배치 칸 {region.RangedTiles.Count} " +
+        return $"{laneText} · 공중 경로 {airRoutes}개 · 근접 배치 칸 {region.MeleeTiles.Count}(레인 위 {meleeOnLane}) · 원거리 배치 칸 {region.RangedTiles.Count} " +
             $"· 칸 크기 {region.CellSize:N1} · 보스 지연 {region.BossSpawnDelay:N0}초";
     }
 }
