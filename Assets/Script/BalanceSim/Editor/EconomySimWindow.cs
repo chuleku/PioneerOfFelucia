@@ -5,45 +5,60 @@ using System.Text;
 using UnityEditor;
 using UnityEngine;
 
-// 낮 경제만 하루 단위로 돌려 보는 창(밸런스 시뮬 1단계). 입력을 받아 Runner에 맡기고, 결과를 표·그래프·CSV로 내보내기만 한다.
-// 영웅·전투는 아직 없다 - 금은 영웅 생성·강화에만 쓰이므로 여기선 쌓이기만 하고, 영웅 몫 시민은 "영웅 예약"으로만 빼 둔다.
+// 밸런스 시뮬 창. 1단계(낮 경제) + 2단계(영웅 생성·합성·강화). 입력을 받아 Runner에 맡기고, 결과를 표·그래프·CSV로 내보내기만 한다.
+// 전투·배치는 3단계 - 전투력은 "보유 영웅 합계"(배치 칸 수·시너지 미반영)다.
 public class EconomySimWindow : EditorWindow
 {
     private const string MenuPath = "Tools/Balance/Economy Simulator";
     private const string WindowTitle = "Economy Simulator";
+    private const string RunLabel = "실행";
     private const string ReloadLabel = "에셋 다시 읽기";
     private const string ExportLabel = "CSV 내보내기";
     private const string DaysLabel = "일수";
     private const string StrategyLabel = "전략";
-    private const string HeroReserveLabel = "영웅 예약 시민";
+    private const string SeedLabel = "시드";
+    private const string SeedCountLabel = "반복(시드 수)";
+    private const string ChartModeLabel = "그래프";
     private const string TitleFoldoutLabel = "타이틀 강화 해금 단계";
     private const string ConstructDiscountLabel = "건설비 할인";
     private const string UpgradeDiscountLabel = "강화비 할인";
     private const string ProductAmountLabel = "생산량";
     private const string StartingResourceLabel = "시작 자원";
     private const string MaxCitizenLabel = "최대 시민";
-    private const string CompareHeader = "전략 비교 (마지막 날 기준)";
+    private const string HeroCreateDiscountLabel = "영웅 생성비 할인";
+    private const string HeroUpgradeDiscountLabel = "영웅 강화비 할인";
+    private const string DirtyNote = "입력이 바뀌었습니다 — 실행을 누르면 반영됩니다.";
+    private const string CompareHeaderFormat = "전략 비교 ({0}일차, 시드 {1}개 평균)";
     private const string ConditionNote =
-        "전투·영웅 없음 · 금은 영웅 생성·강화에만 쓰여 이 단계에선 쌓이기만 함(영웅 예산으로 읽기) · 특수 자원(교역) 미반영 · " +
-        "지역은 1번에서 시작해 10일마다 하나씩(11·21일차~) 열림 · 생산은 밤이 끝날 때 지급";
+        "전투·배치 없음(3단계) · 전투력 = 보유 영웅 전원의 초당 피해·체력 합계(방어 0) · 특수 자원(교역) 미반영 · " +
+        "지역은 1번에서 시작해 10일마다 하나씩(11·21일차~) 열림 · 생산은 밤이 끝날 때 지급 · 자원 칸은 낮 끝 보유량(+다음 날 수입)";
     private const string MissingAssetsNote =
         "경제 에셋을 찾지 못했습니다 — ProductionValue·HouseConfig·ProductionEconomyConfig·ResourcesManager/CitizenManager/BasePanel 프리팹을 확인하세요.";
-    private const string CsvFileName = "economy_sim";
+    private const string MissingHeroNote =
+        "영웅 값을 찾지 못했습니다 — MainScene의 HeroSetPanel·HeroCreateManager·HeroRegistry와 HeroUpgradeConfig·HeroClassUpgradeConfig를 확인하세요.";
+    private const string CsvFileName = "balance_sim";
     private const string CsvExtension = "csv";
+    private const string DefaultSeed = "balance";
 
     private const int MinimumDays = 1;
     private const int MaximumDays = 200;
     private const int DefaultDays = 30;
-    private const int MaximumHeroReserve = 50;
-    private const float LabelWidth = 110f;
+    private const int MaximumSeedCount = 50;
+    private const int DefaultSeedCount = 10;
+    private const float LabelWidth = 120f;
     private const float ChartHeight = 180f;
     private const float ChartPadding = 6f;
     private const float LegendWidth = 70f;
 
     private const float DayWidth = 40f;
-    private const float ResourceWidth = 118f;
-    private const float CountWidth = 132f;
-    private const float CitizenWidth = 90f;
+    private const float StrategyWidth = 120f;
+    private const float ResourceWidth = 104f;
+    private const float CitizenWidth = 112f;
+    private const float FacilityWidth = 92f;
+    private const float HeroWidth = 150f;
+    private const float PowerWidth = 120f;
+    private const float BlockWidth = 130f;
+    private const float CompareNumberWidth = 150f;
 
     private static readonly Color[] ResourceColors =
     {
@@ -53,18 +68,41 @@ public class EconomySimWindow : EditorWindow
         new Color(0.60f, 0.65f, 0.75f), // Iron
         new Color(0.55f, 0.55f, 0.55f), // Stone
     };
+    private static readonly Color DpsColor = new Color(0.90f, 0.35f, 0.30f);
+    private static readonly Color HpColor = new Color(0.35f, 0.65f, 0.95f);
     private static readonly Color ChartBackground = new Color(0f, 0f, 0f, 0.2f);
     private static readonly string[] ResourceNames = Enum.GetNames(typeof(ProductionType));
+    private static readonly string[] ChartModes = { "자원", "전투력" };
+
+    // 전략 하나를 시드 여러 개로 돌린 마지막 날 요약.
+    private class StrategySummary
+    {
+        public string Name;
+        public float HeroCount;
+        public float DpsMean;
+        public float DpsMin = float.MaxValue;
+        public float DpsMax;
+        public float HpMean;
+        public float GoldMean;
+        public int FacilityCount;
+        public readonly Dictionary<string, int> BlockDays = new(); // 막힌 이유별 일수(시드 전체 합)
+    }
 
     private EconomySimAssets assets;
+    private BalanceHeroAssets heroAssets;
     private readonly EconomySimTitleInput titleInput = new();
+    private readonly Dictionary<(HeroData, int), HeroSimResult> powerCache = new();
     private int dayCount = DefaultDays;
-    private int heroReserve;
     private int strategyIndex;
+    private string seed = DefaultSeed;
+    private int seedCount = DefaultSeedCount;
+    private int chartMode;
     private bool titleFoldout;
+    private bool dirty;
     private string[] strategyNames = Array.Empty<string>();
+    private string poolNote = string.Empty;
     private List<EconomySimDayLog> logs = new();
-    private readonly List<(string Name, EconomySimDayLog Last)> comparison = new();
+    private readonly List<StrategySummary> comparison = new();
     private Vector2 scroll;
 
     [MenuItem(MenuPath)]
@@ -81,40 +119,48 @@ public class EconomySimWindow : EditorWindow
     private void ReloadAssets()
     {
         assets = EconomySimSource.Load();
+        heroAssets = BalanceHeroSource.Load();
+        powerCache.Clear();
+        poolNote = BuildPoolNote();
         Rebuild();
     }
 
+    private bool AssetsReady => assets != null && assets.IsValid && heroAssets != null && heroAssets.IsValid;
+
     private void OnGUI()
     {
-        if (assets == null || !assets.IsValid)
+        if (!AssetsReady)
         {
-            EditorGUILayout.HelpBox(MissingAssetsNote, MessageType.Warning);
+            if (assets == null || !assets.IsValid) EditorGUILayout.HelpBox(MissingAssetsNote, MessageType.Warning);
+            if (heroAssets == null || !heroAssets.IsValid) EditorGUILayout.HelpBox(MissingHeroNote, MessageType.Warning);
             if (GUILayout.Button(ReloadLabel)) ReloadAssets();
             return;
         }
 
         DrawControls();
         EditorGUILayout.LabelField(ConditionNote, EditorStyles.wordWrappedMiniLabel);
+        EditorGUILayout.LabelField(poolNote, EditorStyles.wordWrappedMiniLabel);
+        if (dirty) EditorGUILayout.HelpBox(DirtyNote, MessageType.Info);
         DrawComparison();
         DrawChart();
         DrawTable();
     }
 
-    // 입력이 바뀐 프레임에만 다시 돌린다. 200일 × 전략 3개도 순식간이라 버튼 없이 바로 갱신한다.
     private void DrawControls()
     {
         using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar))
         {
+            if (GUILayout.Button(RunLabel, EditorStyles.toolbarButton)) Rebuild();
             GUILayout.FlexibleSpace();
             if (GUILayout.Button(ExportLabel, EditorStyles.toolbarButton)) ExportCsv();
             if (GUILayout.Button(ReloadLabel, EditorStyles.toolbarButton)) ReloadAssets();
         }
 
-        EditorGUI.BeginChangeCheck();
         EditorGUIUtility.labelWidth = LabelWidth;
+        EditorGUI.BeginChangeCheck();
         dayCount = EditorGUILayout.IntSlider(DaysLabel, dayCount, MinimumDays, MaximumDays);
-        strategyIndex = EditorGUILayout.Popup(StrategyLabel, strategyIndex, strategyNames);
-        heroReserve = EditorGUILayout.IntSlider(HeroReserveLabel, heroReserve, 0, MaximumHeroReserve);
+        seed = EditorGUILayout.TextField(SeedLabel, seed);
+        seedCount = EditorGUILayout.IntSlider(SeedCountLabel, seedCount, 1, MaximumSeedCount);
 
         titleFoldout = EditorGUILayout.Foldout(titleFoldout, TitleFoldoutLabel, true);
         if (titleFoldout)
@@ -126,10 +172,17 @@ public class EconomySimWindow : EditorWindow
                 titleInput.ProductAmount = BranchSlider(ProductAmountLabel, titleInput.ProductAmount, assets.EconomyConfig.ProductAmountUpgrades.Count);
                 titleInput.StartingResource = BranchSlider(StartingResourceLabel, titleInput.StartingResource, assets.StartingResourceUpgrades.Count);
                 titleInput.MaxCitizen = BranchSlider(MaxCitizenLabel, titleInput.MaxCitizen, assets.MaxCitizenUpgrades.Count);
+                titleInput.HeroCreateDiscount = BranchSlider(HeroCreateDiscountLabel, titleInput.HeroCreateDiscount, heroAssets.CreateCostUpgrades.Count);
+                titleInput.HeroUpgradeDiscount = BranchSlider(HeroUpgradeDiscountLabel, titleInput.HeroUpgradeDiscount, heroAssets.ClassConfig.UpgradeCostUpgrades.Count);
             }
         }
+        if (EditorGUI.EndChangeCheck()) dirty = true;
 
-        if (EditorGUI.EndChangeCheck()) Rebuild();
+        // 표시할 전략만 바꾸는 건 그 전략 한 판만 다시 돌리면 되니 바로 반영한다.
+        EditorGUI.BeginChangeCheck();
+        strategyIndex = EditorGUILayout.Popup(StrategyLabel, strategyIndex, strategyNames);
+        if (EditorGUI.EndChangeCheck()) RebuildDisplayed();
+        chartMode = EditorGUILayout.Popup(ChartModeLabel, chartMode, ChartModes);
     }
 
     private static int BranchSlider(string label, int value, int max)
@@ -137,36 +190,131 @@ public class EconomySimWindow : EditorWindow
         return EditorGUILayout.IntSlider(label, Mathf.Min(value, max), 0, max);
     }
 
-    // 모든 전략을 같은 조건으로 돌려 비교표를 만들고, 고른 전략의 일별 기록을 남긴다.
+    // 모든 전략을 시드 seedCount개로 돌려 비교표를 만들고, 고른 전략의 첫 시드 결과를 일별 표로 남긴다.
     private void Rebuild()
     {
         comparison.Clear();
         logs = new List<EconomySimDayLog>();
-        if (assets == null || !assets.IsValid) return;
+        dirty = false;
+        if (!AssetsReady) return;
 
-        List<IEconomySimStrategy> strategies = RuleEconomyStrategy.CreatePresets(heroReserve);
+        List<IEconomySimStrategy> strategies = RuleEconomyStrategy.CreatePresets();
         strategyNames = strategies.ConvertAll(strategy => strategy.Name).ToArray();
-        strategyIndex = Mathf.Clamp(strategyIndex, 0, strategies.Count - 1);
 
-        for (int index = 0; index < strategies.Count; index++)
+        foreach (IEconomySimStrategy strategy in strategies)
         {
-            List<EconomySimDayLog> result = EconomySimRunner.Run(assets, titleInput, strategies[index], dayCount);
-            comparison.Add((strategies[index].Name, result[result.Count - 1]));
-            if (index == strategyIndex) logs = result;
+            var summary = new StrategySummary { Name = strategy.Name };
+            for (int run = 0; run < seedCount; run++)
+            {
+                List<EconomySimDayLog> result = EconomySimRunner.Run(assets, heroAssets, titleInput, strategy, dayCount,
+                    RunSeed(run), false, powerCache);
+                Accumulate(summary, result);
+            }
+            Finish(summary);
+            comparison.Add(summary);
         }
+        RebuildDisplayed();
+    }
+
+    // 표·그래프에 올릴 한 판(고른 전략, 첫 시드)은 매일 전투력까지 계산해 다시 돌린다.
+    private void RebuildDisplayed()
+    {
+        if (!AssetsReady) return;
+        List<IEconomySimStrategy> strategies = RuleEconomyStrategy.CreatePresets();
+        strategyIndex = Mathf.Clamp(strategyIndex, 0, strategies.Count - 1);
+        logs = EconomySimRunner.Run(assets, heroAssets, titleInput, strategies[strategyIndex], dayCount, RunSeed(0), true, powerCache);
+    }
+
+    private string RunSeed(int run) => $"{seed}-{run}";
+
+    private static void Accumulate(StrategySummary summary, List<EconomySimDayLog> result)
+    {
+        EconomySimDayLog last = result[result.Count - 1];
+        summary.HeroCount += last.HeroCount;
+        summary.DpsMean += last.PowerDps;
+        summary.DpsMin = Mathf.Min(summary.DpsMin, last.PowerDps);
+        summary.DpsMax = Mathf.Max(summary.DpsMax, last.PowerDps);
+        summary.HpMean += last.PowerHp;
+        summary.GoldMean += last.DayEnd[(int)ProductionType.Gold];
+        foreach (int count in last.FacilityCounts) summary.FacilityCount += count;
+
+        foreach (EconomySimDayLog log in result)
+        {
+            if (log.HeroBlock == null) continue;
+            summary.BlockDays.TryGetValue(log.HeroBlock, out int days);
+            summary.BlockDays[log.HeroBlock] = days + 1;
+        }
+    }
+
+    private void Finish(StrategySummary summary)
+    {
+        summary.HeroCount /= seedCount;
+        summary.DpsMean /= seedCount;
+        summary.HpMean /= seedCount;
+        summary.GoldMean /= seedCount;
+        summary.FacilityCount /= seedCount;
+    }
+
+    // (티어, 종류)별 생성·합성 후보 수. 같은 영웅 3개가 모여야 합성되므로 후보가 많을수록 합성이 드물다.
+    private string BuildPoolNote()
+    {
+        if (heroAssets == null || !heroAssets.IsValid) return string.Empty;
+        var builder = new StringBuilder($"영웅 값: {heroAssets.SourceNote} · 후보 수");
+        foreach (var (ranged, label) in new[] { (false, "근접"), (true, "원거리") })
+        {
+            builder.Append($" · {label}");
+            for (int tier = 1; tier <= EconomySimRunner.MaxHeroTier; tier++)
+            {
+                int count = 0;
+                foreach (HeroData data in heroAssets.Pool)
+                {
+                    if (data.Tier == tier && (data.HeroType == BalanceHero.RangedHeroType) == ranged) count++;
+                }
+                builder.Append($" T{tier}:{count}");
+            }
+        }
+        builder.Append($" · 생성가 점증 하루 {heroAssets.DailyIncreaseRate:P0} / 지역 {heroAssets.RegionIncreaseRate:P0}");
+        return builder.ToString();
     }
 
     private void DrawComparison()
     {
-        EditorGUILayout.LabelField(CompareHeader, EditorStyles.boldLabel);
-        DrawHeaderRow(StrategyLabel, CountWidth);
-        foreach (var (name, last) in comparison)
+        if (comparison.Count == 0) return;
+        EditorGUILayout.LabelField(string.Format(CompareHeaderFormat, dayCount, seedCount), EditorStyles.boldLabel);
+        using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar))
         {
-            DrawLogRow(name, CountWidth, last);
+            GUILayout.Label(StrategyLabel, GUILayout.Width(StrategyWidth));
+            GUILayout.Label("영웅 수", GUILayout.Width(FacilityWidth));
+            GUILayout.Label("초당 피해 평균(최소~최대)", GUILayout.Width(CompareNumberWidth + FacilityWidth));
+            GUILayout.Label("체력 합계 평균", GUILayout.Width(CompareNumberWidth));
+            GUILayout.Label("금 낮 끝", GUILayout.Width(FacilityWidth));
+            GUILayout.Label("시설", GUILayout.Width(BlockWidth));
+            GUILayout.Label("영웅 생성이 막힌 날(이유별, 시드 합)", GUILayout.ExpandWidth(true));
+        }
+        foreach (StrategySummary summary in comparison)
+        {
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.Label(summary.Name, GUILayout.Width(StrategyWidth));
+                GUILayout.Label($"{summary.HeroCount:N1}", GUILayout.Width(FacilityWidth));
+                GUILayout.Label($"{summary.DpsMean:N1} ({summary.DpsMin:N1}~{summary.DpsMax:N1})", GUILayout.Width(CompareNumberWidth + FacilityWidth));
+                GUILayout.Label($"{summary.HpMean:N0}", GUILayout.Width(CompareNumberWidth));
+                GUILayout.Label($"{summary.GoldMean:N0}", GUILayout.Width(FacilityWidth));
+                GUILayout.Label($"{summary.FacilityCount}", GUILayout.Width(BlockWidth));
+                GUILayout.Label(BlockSummary(summary.BlockDays), EditorStyles.miniLabel, GUILayout.ExpandWidth(true));
+            }
         }
     }
 
-    // 자원 5종 보유량 꺾은선. 축 눈금 대신 최댓값만 적는다.
+    private static string BlockSummary(Dictionary<string, int> blockDays)
+    {
+        if (blockDays.Count == 0) return "-";
+        var entries = new List<KeyValuePair<string, int>>(blockDays);
+        entries.Sort((left, right) => right.Value.CompareTo(left.Value));
+        return string.Join(" · ", entries.ConvertAll(entry => $"{entry.Key} {entry.Value}"));
+    }
+
+    // 자원 5종 보유량 또는 전투력(초당 피해·체력) 꺾은선. 전투력은 둘의 단위가 달라 각자 최댓값 기준으로 그린다.
     private void DrawChart()
     {
         if (logs.Count == 0) return;
@@ -177,77 +325,109 @@ public class EconomySimWindow : EditorWindow
         Rect plot = new Rect(area.x + ChartPadding, area.y + ChartPadding,
             area.width - LegendWidth - ChartPadding * 2f, area.height - ChartPadding * 2f);
 
-        int max = 1;
+        if (chartMode == 0)
+        {
+            float max = 1f;
+            foreach (EconomySimDayLog log in logs)
+            {
+                foreach (int amount in log.DayEnd) max = Mathf.Max(max, amount);
+            }
+            for (int type = 0; type < ResourceNames.Length; type++)
+            {
+                int captured = type;
+                DrawLine(plot, log => log.DayEnd[captured], max, ResourceColors[type % ResourceColors.Length], ResourceNames[type], type);
+            }
+            DrawMaxLabel(plot, $"max {max:N0}");
+            return;
+        }
+
+        float maxDps = 1f;
+        float maxHp = 1f;
         foreach (EconomySimDayLog log in logs)
         {
-            foreach (int amount in log.DayEnd) max = Mathf.Max(max, amount);
+            maxDps = Mathf.Max(maxDps, log.PowerDps);
+            maxHp = Mathf.Max(maxHp, log.PowerHp);
         }
+        DrawLine(plot, log => log.PowerDps, maxDps, DpsColor, "초당 피해", 0);
+        DrawLine(plot, log => log.PowerHp, maxHp, HpColor, "체력", 1);
+        DrawMaxLabel(plot, $"피해 max {maxDps:N1} · 체력 max {maxHp:N0}");
+    }
 
-        for (int type = 0; type < ResourceNames.Length; type++)
+    private void DrawLine(Rect plot, Func<EconomySimDayLog, float> value, float max, Color color, string legend, int legendRow)
+    {
+        var points = new Vector3[logs.Count];
+        for (int index = 0; index < logs.Count; index++)
         {
-            var points = new Vector3[logs.Count];
-            for (int index = 0; index < logs.Count; index++)
-            {
-                float x = logs.Count == 1 ? plot.x : plot.x + plot.width * index / (logs.Count - 1);
-                float y = plot.yMax - plot.height * Mathf.Max(0, logs[index].DayEnd[type]) / max;
-                points[index] = new Vector3(x, y);
-            }
-            Handles.color = ResourceColors[type % ResourceColors.Length];
-            Handles.DrawAAPolyLine(2f, points);
-
-            var legend = new Rect(plot.xMax + ChartPadding, plot.y + type * EditorGUIUtility.singleLineHeight, LegendWidth, EditorGUIUtility.singleLineHeight);
-            var style = new GUIStyle(EditorStyles.miniLabel) { normal = { textColor = ResourceColors[type % ResourceColors.Length] } };
-            GUI.Label(legend, ResourceNames[type], style);
+            float x = logs.Count == 1 ? plot.x : plot.x + plot.width * index / (logs.Count - 1);
+            float y = plot.yMax - plot.height * Mathf.Max(0f, value(logs[index])) / max;
+            points[index] = new Vector3(x, y);
         }
-        GUI.Label(new Rect(plot.x, plot.y, plot.width, EditorGUIUtility.singleLineHeight), $"max {max:N0}", EditorStyles.miniLabel);
+        Handles.color = color;
+        Handles.DrawAAPolyLine(2f, points);
+
+        var rect = new Rect(plot.xMax + ChartPadding, plot.y + legendRow * EditorGUIUtility.singleLineHeight, LegendWidth, EditorGUIUtility.singleLineHeight);
+        var style = new GUIStyle(EditorStyles.miniLabel) { normal = { textColor = color } };
+        GUI.Label(rect, legend, style);
+    }
+
+    private static void DrawMaxLabel(Rect plot, string text)
+    {
+        GUI.Label(new Rect(plot.x, plot.y, plot.width, EditorGUIUtility.singleLineHeight), text, EditorStyles.miniLabel);
     }
 
     private void DrawTable()
     {
-        DrawHeaderRow(DaysLabel, DayWidth);
+        using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar))
+        {
+            GUILayout.Label(DaysLabel, GUILayout.Width(DayWidth));
+            foreach (string name in ResourceNames)
+            {
+                GUILayout.Label($"{name}(+수입)", GUILayout.Width(ResourceWidth));
+            }
+            GUILayout.Label("시민 일/영웅/현재/최대", GUILayout.Width(CitizenWidth));
+            GUILayout.Label("시설+집 / 슬롯", GUILayout.Width(FacilityWidth));
+            GUILayout.Label("영웅 근/원 · T1~T4", GUILayout.Width(HeroWidth));
+            GUILayout.Label("피해 / 체력", GUILayout.Width(PowerWidth));
+            GUILayout.Label("막힘", GUILayout.Width(BlockWidth));
+            GUILayout.Label("행동", GUILayout.ExpandWidth(true));
+        }
+
         using var scope = new EditorGUILayout.ScrollViewScope(scroll);
         scroll = scope.scrollPosition;
         foreach (EconomySimDayLog log in logs)
         {
-            DrawLogRow(log.Day.ToString(), DayWidth, log);
-        }
-    }
-
-    private static void DrawHeaderRow(string firstColumn, float firstWidth)
-    {
-        using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar))
-        {
-            GUILayout.Label(firstColumn, GUILayout.Width(firstWidth));
-            foreach (string name in ResourceNames)
+            using (new EditorGUILayout.HorizontalScope())
             {
-                GUILayout.Label($"{name} 낮 끝(+수입)", GUILayout.Width(ResourceWidth));
+                GUILayout.Label(log.Day.ToString(), GUILayout.Width(DayWidth));
+                for (int type = 0; type < ResourceNames.Length; type++)
+                {
+                    GUILayout.Label($"{log.DayEnd[type]:N0} (+{log.Income[type]:N0})", GUILayout.Width(ResourceWidth));
+                }
+                GUILayout.Label($"{log.AssignedWorkers}/{log.HeroCitizens}/{log.CurrentCitizen}/{log.MaxCitizen}", GUILayout.Width(CitizenWidth));
+                GUILayout.Label($"{FacilityTotal(log)}+{log.HouseCount} / {log.UsedSlots}/{log.TotalSlots}", GUILayout.Width(FacilityWidth));
+                GUILayout.Label($"{log.MeleeCount}/{log.RangedCount} · {TierSummary(log)}", GUILayout.Width(HeroWidth));
+                GUILayout.Label($"{log.PowerDps:N1} / {log.PowerHp:N0}", GUILayout.Width(PowerWidth));
+                GUILayout.Label(log.HeroBlock ?? "-", GUILayout.Width(BlockWidth));
+                GUILayout.Label(ActionSummary(log), EditorStyles.miniLabel, GUILayout.ExpandWidth(true));
             }
-            GUILayout.Label("시민 배치/현재/최대", GUILayout.Width(CountWidth));
-            GUILayout.Label("시설·집 / 슬롯", GUILayout.Width(CountWidth));
-            GUILayout.Label("행동", GUILayout.ExpandWidth(true));
         }
     }
 
-    private static void DrawLogRow(string firstColumn, float firstWidth, EconomySimDayLog log)
-    {
-        using (new EditorGUILayout.HorizontalScope())
-        {
-            GUILayout.Label(firstColumn, GUILayout.Width(firstWidth));
-            for (int type = 0; type < ResourceNames.Length; type++)
-            {
-                GUILayout.Label($"{log.DayEnd[type]:N0} (+{log.Income[type]:N0})", GUILayout.Width(ResourceWidth));
-            }
-            GUILayout.Label($"{log.AssignedWorkers}/{log.CurrentCitizen}/{log.MaxCitizen}", GUILayout.Width(CountWidth));
-            GUILayout.Label($"{FacilitySummary(log)}+{log.HouseCount} / {log.UsedSlots}/{log.TotalSlots}", GUILayout.Width(CountWidth));
-            GUILayout.Label(ActionSummary(log), EditorStyles.miniLabel, GUILayout.ExpandWidth(true));
-        }
-    }
-
-    private static int FacilitySummary(EconomySimDayLog log)
+    private static int FacilityTotal(EconomySimDayLog log)
     {
         int total = 0;
         foreach (int count in log.FacilityCounts) total += count;
         return total;
+    }
+
+    private static string TierSummary(EconomySimDayLog log)
+    {
+        var parts = new string[EconomySimRunner.MaxHeroTier];
+        for (int tier = 1; tier <= EconomySimRunner.MaxHeroTier; tier++)
+        {
+            parts[tier - 1] = log.HeroTierCounts[tier].ToString();
+        }
+        return string.Join("/", parts);
     }
 
     // 같은 행동이 연달아 나오면 "배치 4 ×3"처럼 묶는다.
@@ -279,7 +459,9 @@ public class EconomySimWindow : EditorWindow
         var builder = new StringBuilder();
         builder.Append("Day,Regions");
         foreach (string name in ResourceNames) builder.Append($",{name},{name}Income,{name}AfterPayout,{name}Spent,{name}Facilities");
-        builder.AppendLine(",Houses,Citizens,MaxCitizens,Workers,OpenWorkerSlots,UsedSlots,TotalSlots,Actions");
+        builder.Append(",Houses,Citizens,MaxCitizens,Workers,HeroCitizens,OpenWorkerSlots,UsedSlots,TotalSlots,Melee,Ranged");
+        for (int tier = 1; tier <= EconomySimRunner.MaxHeroTier; tier++) builder.Append($",T{tier}");
+        builder.AppendLine(",CreatedToday,MeleeClassLv,RangedClassLv,Dps,Hp,HeroBlock,Actions");
 
         foreach (EconomySimDayLog log in logs)
         {
@@ -288,8 +470,11 @@ public class EconomySimWindow : EditorWindow
             {
                 builder.Append($",{log.DayEnd[type]},{log.Income[type]},{log.End[type]},{log.Spent[type]},{log.FacilityCounts[type]}");
             }
-            builder.AppendLine($",{log.HouseCount},{log.CurrentCitizen},{log.MaxCitizen},{log.AssignedWorkers},{log.OpenWorkerSlots}," +
-                $"{log.UsedSlots},{log.TotalSlots},\"{ActionSummary(log)}\"");
+            builder.Append($",{log.HouseCount},{log.CurrentCitizen},{log.MaxCitizen},{log.AssignedWorkers},{log.HeroCitizens}," +
+                $"{log.OpenWorkerSlots},{log.UsedSlots},{log.TotalSlots},{log.MeleeCount},{log.RangedCount}");
+            for (int tier = 1; tier <= EconomySimRunner.MaxHeroTier; tier++) builder.Append($",{log.HeroTierCounts[tier]}");
+            builder.AppendLine($",{log.CreatedToday},{log.MeleeClassLevel},{log.RangedClassLevel},{log.PowerDps:F1},{log.PowerHp:F0}," +
+                $"{log.HeroBlock},\"{ActionSummary(log)}\"");
         }
 
         File.WriteAllText(path, builder.ToString(), new UTF8Encoding(true));

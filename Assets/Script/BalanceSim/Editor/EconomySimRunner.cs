@@ -16,10 +16,25 @@ public class EconomySimDayLog
     public int CurrentCitizen;
     public int MaxCitizen;
     public int AssignedWorkers;
+    public int HeroCitizens;
     public int OpenWorkerSlots;
     public int UsedSlots;
     public int TotalSlots;
     public readonly List<string> Actions = new();
+
+    // 영웅
+    public readonly int[] HeroTierCounts = new int[EconomySimRunner.MaxHeroTier + 1]; // 인덱스 = 티어
+    public int MeleeCount;
+    public int RangedCount;
+    public int CreatedToday;
+    public int MeleeClassLevel;
+    public int RangedClassLevel;
+    public string HeroBlock;    // 낮이 끝났을 때 근접 영웅 하나를 더 못 만든 이유(인구/자원 이름). 영웅을 안 쓰는 전략이면 null
+    public bool HasPower;       // 비교표용 실행은 마지막 날만 전투력을 계산한다
+    public float PowerDps;
+    public float PowerHp;
+
+    public int HeroCount => MeleeCount + RangedCount;
 }
 
 // 타이틀 강화 계열마다 앞에서부터 몇 단계를 해금한 상태로 볼지.
@@ -30,34 +45,44 @@ public class EconomySimTitleInput
     public int ProductAmount;
     public int StartingResource;
     public int MaxCitizen;
+    public int HeroCreateDiscount;
+    public int HeroUpgradeDiscount;
 }
 
 // 낮(봇 행동) -> 밤(전투 없음) -> 생산 지급을 하루 단위로 반복한다.
 public static class EconomySimRunner
 {
     public static readonly int ResourceTypeCount = Enum.GetValues(typeof(ProductionType)).Length;
+    public const int MaxHeroTier = 4;
 
+    // 맵 모듈 프리팹 중 MapModule_A(1번 지역)만 열린 상태로 시작한다.
+    public const int StartingRegions = 1;
     // DayState가 10일마다 지원 요청을 켜고, 그날 밤 결과 화면에서 다음 지역이 열린다 -> 11, 21일차부터 사용 가능.
     private const int RegionUnlockInterval = 10;
-    // 맵 모듈 프리팹 중 MapModule_A(1번 지역)만 열린 상태로 시작한다.
-    private const int StartingRegions = 1;
     // 0일차는 튜토리얼이 끝나면 자원을 시작값으로 되돌리므로 1일차부터 돈다.
     private const int FirstDay = 1;
 
-    public static List<EconomySimDayLog> Run(EconomySimAssets assets, EconomySimTitleInput title,
-        IEconomySimStrategy strategy, int dayCount)
+    // powerEveryDay가 false면 마지막 날만 전투력을 계산한다(전략 비교용 반복 실행을 가볍게).
+    public static List<EconomySimDayLog> Run(EconomySimAssets assets, BalanceHeroAssets heroAssets, EconomySimTitleInput title,
+        IEconomySimStrategy strategy, int dayCount, string seed, bool powerEveryDay,
+        Dictionary<(HeroData, int), HeroSimResult> powerCache)
     {
         var logs = new List<EconomySimDayLog>(dayCount);
-        using var world = new EconomySimWorld(assets, BuildUpgradeState(assets, title));
+        UpgradeState upgradeState = BuildUpgradeState(assets, heroAssets, title);
+        using var world = new EconomySimWorld(assets, upgradeState);
+        var heroes = new BalanceHeroWorld(heroAssets, world, upgradeState, seed, powerCache);
+        int lastDay = FirstDay + dayCount - 1;
 
-        for (int day = FirstDay; day < FirstDay + dayCount; day++)
+        for (int day = FirstDay; day <= lastDay; day++)
         {
             var log = new EconomySimDayLog { Day = day };
             world.SetUnlockedRegions(StartingRegions + (day - FirstDay) / RegionUnlockInterval);
+            heroes.StartDay();
 
             int[] before = Snapshot(world.Resources);
-            strategy.PlayDay(world, log);
+            strategy.PlayDay(world, heroes, log);
             int[] afterDay = Snapshot(world.Resources);
+            log.HeroBlock = strategy.UsesHeroes ? heroes.GetBlockReason(OccupantKind.MeleeHero) : null;
 
             foreach (var (type, amount) in world.PayOut())
             {
@@ -70,6 +95,7 @@ public static class EconomySimRunner
                 log.DayEnd[index] = afterDay[index];
             }
             FillState(world, log);
+            FillHeroState(heroes, log, powerEveryDay || day == lastDay);
             logs.Add(log);
         }
         return logs;
@@ -77,7 +103,7 @@ public static class EconomySimRunner
 
     // PlayerPrefs의 실제 타이틀 진행도를 쓰지 않도록 생성 직후 해금 목록을 덮어쓴다.
     // Unlock/AddPoints는 PlayerPrefs에 저장해 버리므로 부르지 않는다.
-    private static UpgradeState BuildUpgradeState(EconomySimAssets assets, EconomySimTitleInput title)
+    private static UpgradeState BuildUpgradeState(EconomySimAssets assets, BalanceHeroAssets heroAssets, EconomySimTitleInput title)
     {
         var ids = new List<string>();
         AddFirstIds(ids, assets.EconomyConfig.ConstructCostUpgrades, title.ConstructDiscount);
@@ -85,6 +111,8 @@ public static class EconomySimRunner
         AddFirstIds(ids, assets.EconomyConfig.ProductAmountUpgrades, title.ProductAmount);
         AddFirstIds(ids, assets.StartingResourceUpgrades, title.StartingResource);
         AddFirstIds(ids, assets.MaxCitizenUpgrades, title.MaxCitizen);
+        AddFirstIds(ids, heroAssets.CreateCostUpgrades, title.HeroCreateDiscount);
+        AddFirstIds(ids, heroAssets.ClassConfig.UpgradeCostUpgrades, title.HeroUpgradeDiscount);
 
         var state = new UpgradeState();
         state.Restore(new UpgradeSaveData { unlockedIds = ids });
@@ -95,7 +123,7 @@ public static class EconomySimRunner
     {
         for (int index = 0; index < Mathf.Min(count, branch.Count); index++)
         {
-            if (branch[index] != null) ids.Add(branch[index].id);
+            if (branch[index] != null && !ids.Contains(branch[index].id)) ids.Add(branch[index].id);
         }
     }
 
@@ -122,8 +150,26 @@ public static class EconomySimRunner
         log.CurrentCitizen = world.Citizens.CurrentCitizen;
         log.MaxCitizen = world.Citizens.MaxCitizen;
         log.AssignedWorkers = world.AssignedWorkers;
+        log.HeroCitizens = world.Citizens.HeroUsedCitizen;
         log.OpenWorkerSlots = world.OpenWorkerSlots;
         log.TotalSlots = world.TotalSlots;
         log.UsedSlots = world.TotalSlots - world.FreeSlots;
+    }
+
+    private static void FillHeroState(BalanceHeroWorld heroes, EconomySimDayLog log, bool withPower)
+    {
+        foreach (BalanceHero hero in heroes.Roster)
+        {
+            log.HeroTierCounts[Mathf.Clamp(hero.Data.Tier, 0, MaxHeroTier)]++;
+        }
+        log.MeleeCount = heroes.CountByKind(OccupantKind.MeleeHero);
+        log.RangedCount = heroes.CountByKind(OccupantKind.RangedHero);
+        log.CreatedToday = heroes.CreatedToday;
+        log.MeleeClassLevel = heroes.ClassUpgrades.GetLevel(BalanceHero.MeleeHeroType);
+        log.RangedClassLevel = heroes.ClassUpgrades.GetLevel(BalanceHero.RangedHeroType);
+
+        if (!withPower) return;
+        (log.PowerDps, log.PowerHp) = heroes.CalculatePower();
+        log.HasPower = true;
     }
 }

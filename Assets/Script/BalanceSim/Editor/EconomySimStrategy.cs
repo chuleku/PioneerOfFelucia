@@ -4,37 +4,54 @@ using System.Collections.Generic;
 public interface IEconomySimStrategy
 {
     string Name { get; }
-    void PlayDay(EconomySimWorld world, EconomySimDayLog log);
+    bool UsesHeroes { get; }
+    void PlayDay(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log);
 }
 
-// 규칙형 봇. 가중치가 높은 자원 시설을 더 많이 짓고, 빈 일자리 -> 시민 모집 -> 집 순서로 인력을 채운다.
-// 영웅은 아직 모델에 없으므로 heroReserve만큼 시민을 일터에 넣지 않고 남겨 둔다.
+// 영웅 행동을 경제 행동과 어떤 순서로 섞을지.
+public enum HeroSpendPolicy
+{
+    Alternate,      // 영웅 한 번, 경제 한 번 번갈아
+    AfterEconomy,   // 경제가 더 할 게 없을 때만 영웅
+    BeforeEconomy,  // 영웅을 더 못 만들 때만 경제
+    None,           // 영웅 없이 경제만(1단계와 같은 결과 - 회귀 확인용)
+}
+
+// 규칙형 봇. 경제: 가중치가 높은 자원 시설을 더 많이 짓고, 빈 일자리 -> 시민 모집 -> 집 순서로 인력을 채운다.
+// 영웅: 합성 -> 생성(적은 쪽 종류 먼저) -> 직업 강화 순서. 티어 강화는 인게임에서 쓸 수 없어 넣지 않는다.
 public class RuleEconomyStrategy : IEconomySimStrategy
 {
     private const int MaxActionsPerDay = 500; // 규칙이 맞물려 끝나지 않는 경우를 막는 안전장치
+    private const string MeleeLabel = "근접";
+    private const string RangedLabel = "원거리";
 
     private readonly Dictionary<ProductionType, int> buildWeights;
     private readonly bool upgradeBeforeBuild;
-    private readonly int heroReserve;
+    private readonly HeroSpendPolicy heroPolicy;
 
     public string Name { get; }
+    public bool UsesHeroes => heroPolicy != HeroSpendPolicy.None;
 
-    public RuleEconomyStrategy(string name, Dictionary<ProductionType, int> buildWeights, bool upgradeBeforeBuild, int heroReserve)
+    public RuleEconomyStrategy(string name, Dictionary<ProductionType, int> buildWeights, bool upgradeBeforeBuild,
+        HeroSpendPolicy heroPolicy)
     {
         Name = name;
         this.buildWeights = buildWeights;
         this.upgradeBeforeBuild = upgradeBeforeBuild;
-        this.heroReserve = heroReserve;
+        this.heroPolicy = heroPolicy;
     }
 
     // 미리 정해둔 비교용 봇들.
-    public static List<IEconomySimStrategy> CreatePresets(int heroReserve)
+    public static List<IEconomySimStrategy> CreatePresets()
     {
         return new List<IEconomySimStrategy>
         {
-            new RuleEconomyStrategy("균형", Weights(1, 1, 1, 1, 1), false, heroReserve),
-            new RuleEconomyStrategy("건설자원 우선", Weights(2, 1, 1, 1, 2), false, heroReserve),
-            new RuleEconomyStrategy("강화 우선", Weights(1, 1, 1, 1, 1), true, heroReserve),
+            new RuleEconomyStrategy("균형", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.Alternate),
+            new RuleEconomyStrategy("건설자원 우선", Weights(2, 1, 1, 1, 2), false, HeroSpendPolicy.Alternate),
+            new RuleEconomyStrategy("강화 우선", Weights(1, 1, 1, 1, 1), true, HeroSpendPolicy.Alternate),
+            new RuleEconomyStrategy("경제 먼저", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.AfterEconomy),
+            new RuleEconomyStrategy("영웅 먼저", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.BeforeEconomy),
+            new RuleEconomyStrategy("경제만(영웅 없음)", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.None),
         };
     }
 
@@ -51,15 +68,83 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     }
 
     // 할 수 있는 행동이 없을 때까지 한 가지씩 반복한다.
-    public void PlayDay(EconomySimWorld world, EconomySimDayLog log)
+    public void PlayDay(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
     {
         for (int step = 0; step < MaxActionsPerDay; step++)
         {
-            if (!TryOneAction(world, log)) return;
+            if (!TryOneStep(world, heroes, log)) return;
         }
     }
 
-    private bool TryOneAction(EconomySimWorld world, EconomySimDayLog log)
+    private bool TryOneStep(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
+    {
+        switch (heroPolicy)
+        {
+            case HeroSpendPolicy.AfterEconomy:
+                return TryEconomyAction(world, log) || TryHeroAction(world, heroes, log);
+            case HeroSpendPolicy.BeforeEconomy:
+                return TryHeroAction(world, heroes, log) || TryEconomyAction(world, log);
+            case HeroSpendPolicy.None:
+                return TryEconomyAction(world, log);
+            default:
+                bool hero = TryHeroAction(world, heroes, log);
+                bool economy = TryEconomyAction(world, log);
+                return hero || economy;
+        }
+    }
+
+    // ── 영웅 ──
+
+    private bool TryHeroAction(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
+    {
+        if (heroes.TryMergeAny(out BalanceHero merged))
+        {
+            log.Actions.Add($"합성 → {merged.Data.HeroName}(T{merged.Data.Tier})");
+            return true;
+        }
+
+        if (TryCreateHero(world, heroes, log)) return true;
+
+        if (heroes.TryClassUpgrade(out int heroType))
+        {
+            string label = heroType == BalanceHero.RangedHeroType ? RangedLabel : MeleeLabel;
+            log.Actions.Add($"{label} 직업 강화 {heroes.ClassUpgrades.GetLevel(heroType)}");
+            return true;
+        }
+
+        return false;
+    }
+
+    // 적은 쪽 종류를 먼저 시도하고, 막히면 다른 종류를 시도한다. 인구가 없으면 한 명 모집해서 바로 쓴다 -
+    // 따로 두면 다음 경제 행동이 그 시민을 일터로 데려가 버린다.
+    private static bool TryCreateHero(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
+    {
+        OccupantKind first = heroes.CountByKind(OccupantKind.MeleeHero) <= heroes.CountByKind(OccupantKind.RangedHero)
+            ? OccupantKind.MeleeHero
+            : OccupantKind.RangedHero;
+        OccupantKind second = first == OccupantKind.MeleeHero ? OccupantKind.RangedHero : OccupantKind.MeleeHero;
+
+        if (!world.Citizens.CheckCanUseCitizen())
+        {
+            // 자원이 모자라 어차피 못 만들 때는 시민을 모집하지 않는다.
+            if (!heroes.CanAfford(first) && !heroes.CanAfford(second)) return false;
+            if (world.Recruit(1) == 0) return false;
+            log.Actions.Add("모집 1");
+        }
+
+        foreach (OccupantKind kind in new[] { first, second })
+        {
+            if (!heroes.TryCreate(kind, out BalanceHero created)) continue;
+            string label = kind == OccupantKind.RangedHero ? RangedLabel : MeleeLabel;
+            log.Actions.Add($"{label} 생성 → {created.Data.HeroName}(T{created.Data.Tier})");
+            return true;
+        }
+        return false;
+    }
+
+    // ── 경제 ──
+
+    private bool TryEconomyAction(EconomySimWorld world, EconomySimDayLog log)
     {
         if (world.OpenWorkerSlots > 0 && TryFillWorkers(world, log)) return true;
 
@@ -75,9 +160,10 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     }
 
     // 놀고 있는 시민 배치 -> 모자라면 모집 -> 최대 시민이 꽉 찼으면 집 건설/강화.
-    private bool TryFillWorkers(EconomySimWorld world, EconomySimDayLog log)
+    // 영웅이 인구를 티어만큼 써서 놀고 있는 시민 수가 음수일 수 있다.
+    private static bool TryFillWorkers(EconomySimWorld world, EconomySimDayLog log)
     {
-        int idle = world.Citizens.CanUseCitizen - heroReserve;
+        int idle = world.Citizens.CanUseCitizen;
         if (idle > 0)
         {
             int assigned = AssignIdle(world, idle);
@@ -88,7 +174,7 @@ public class RuleEconomyStrategy : IEconomySimStrategy
             }
         }
 
-        int needed = world.OpenWorkerSlots - System.Math.Max(idle, 0);
+        int needed = world.OpenWorkerSlots - System.Math.Min(idle, 0);
         if (world.Citizens.CurrentCitizen < world.Citizens.MaxCitizen)
         {
             int recruited = world.Recruit(needed);
@@ -104,11 +190,10 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     }
 
     // 놀고 있는 시민 + 더 모집할 수 있는 수가 새 시설 하나의 일자리보다 적은지.
-    private bool LacksCitizenRoom(EconomySimWorld world)
+    private static bool LacksCitizenRoom(EconomySimWorld world)
     {
-        int idle = System.Math.Max(world.Citizens.CanUseCitizen - heroReserve, 0);
         int recruitable = world.Citizens.MaxCitizen - world.Citizens.CurrentCitizen;
-        return idle + recruitable < world.NewFacilityWorkers;
+        return world.Citizens.CanUseCitizen + recruitable < world.NewFacilityWorkers;
     }
 
     // 집 건설, 슬롯이 없으면 기존 집 강화로 최대 시민을 늘린다.
