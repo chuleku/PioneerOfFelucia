@@ -95,6 +95,26 @@ public class BalanceHeroWorld
         return resources == null ? BalanceBlockReason.Population : $"{BalanceBlockReason.Population}+{resources}";
     }
 
+    // 다음 1명 비용에서 처음으로 모자란 자원(비용 표기 순서 기준). 다 있으면 null.
+    public ProductionType? FirstMissingResource(OccupantKind kind)
+    {
+        foreach (var (type, amount) in GetNextCost(kind))
+        {
+            if (amount < 0 && economy.Resources.GetAmount(type) < -amount) return type;
+        }
+        return null;
+    }
+
+    // 다음 1명 비용 중 해당 자원의 양(양수). 비용에 없으면 0.
+    public int CostOf(OccupantKind kind, ProductionType resource)
+    {
+        foreach (var (type, amount) in GetNextCost(kind))
+        {
+            if (type == resource) return -amount;
+        }
+        return 0;
+    }
+
     // 인구는 빼고 자원만 보면 하나 더 만들 수 있는지.
     public bool CanAfford(OccupantKind kind) => economy.Resources.CheckResources(GetNextCost(kind));
 

@@ -77,6 +77,24 @@ public class EconomySimWorld : IDisposable
         return true;
     }
 
+    // 시설 하나를 철거하고(BaseConstructor.Demolish - 건설비·강화비 전액 환불, 일꾼 반납) 그 자리에 다른 종류를 짓는다.
+    // 환불받은 건설비로 같은 값의 새 시설을 지을 수 있다. 집은 게임에서 철거할 수 없어 받지 않는다.
+    public bool TryReplaceFacility(ProductionFacility target, ProductionType newType)
+    {
+        for (int regionIndex = 0; regionIndex < UnlockedRegionCount; regionIndex++)
+        {
+            RegionFacilitySlots region = regions[regionIndex];
+            for (int slotIndex = 0; slotIndex < region.Slots.Count; slotIndex++)
+            {
+                if (region.Slots[slotIndex].Occupant != target) continue;
+                constructor.Demolish(region, slotIndex);
+                Facilities.Remove(target);
+                return TryBuildFacility(newType);
+            }
+        }
+        return false;
+    }
+
     public bool TryBuildHouse()
     {
         if (!TryBuildInFreeSlot(houseOption, out object built)) return false;

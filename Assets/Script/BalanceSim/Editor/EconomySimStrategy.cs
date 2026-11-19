@@ -24,21 +24,25 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     private const int MaxActionsPerDay = 500; // 규칙이 맞물려 끝나지 않는 경우를 막는 안전장치
     private const string MeleeLabel = "근접";
     private const string RangedLabel = "원거리";
+    // 영웅 다음 1명 비용의 몇 배 이상 쌓인 자원을 "남는 자원"으로 볼지(재배치 전략).
+    private const int SurplusHeroMultiple = 10;
 
     private readonly Dictionary<ProductionType, int> buildWeights;
     private readonly bool upgradeBeforeBuild;
     private readonly HeroSpendPolicy heroPolicy;
+    private readonly bool rebalance;
 
     public string Name { get; }
     public bool UsesHeroes => heroPolicy != HeroSpendPolicy.None;
 
     public RuleEconomyStrategy(string name, Dictionary<ProductionType, int> buildWeights, bool upgradeBeforeBuild,
-        HeroSpendPolicy heroPolicy)
+        HeroSpendPolicy heroPolicy, bool rebalance = false)
     {
         Name = name;
         this.buildWeights = buildWeights;
         this.upgradeBeforeBuild = upgradeBeforeBuild;
         this.heroPolicy = heroPolicy;
+        this.rebalance = rebalance;
     }
 
     // 미리 정해둔 비교용 봇들.
@@ -51,6 +55,7 @@ public class RuleEconomyStrategy : IEconomySimStrategy
             new RuleEconomyStrategy("강화 우선", Weights(1, 1, 1, 1, 1), true, HeroSpendPolicy.Alternate),
             new RuleEconomyStrategy("경제 먼저", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.AfterEconomy),
             new RuleEconomyStrategy("영웅 먼저", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.BeforeEconomy),
+            new RuleEconomyStrategy("재배치", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.Alternate, rebalance: true),
             new RuleEconomyStrategy("경제만(영웅 없음)", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.None),
         };
     }
@@ -67,13 +72,48 @@ public class RuleEconomyStrategy : IEconomySimStrategy
         };
     }
 
-    // 할 수 있는 행동이 없을 때까지 한 가지씩 반복한다.
+    // 할 수 있는 행동이 없을 때까지 한 가지씩 반복한다. 재배치 전략은 더 할 게 없을 때 하루 한 번 시설을 바꿔 본다.
     public void PlayDay(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
     {
+        bool rebalancedToday = false;
         for (int step = 0; step < MaxActionsPerDay; step++)
         {
-            if (!TryOneStep(world, heroes, log)) return;
+            if (TryOneStep(world, heroes, log)) continue;
+            if (!rebalance || rebalancedToday || !TryRebalance(world, heroes, log)) return;
+            rebalancedToday = true;
         }
+    }
+
+    // 슬롯이 꽉 찼는데 영웅이 어떤 자원에 막혀 있고 다른 자원은 많이 남으면, 남는 쪽 시설 하나를 철거해
+    // 막힌 쪽 시설로 바꾼다(철거는 전액 환불이라 손해가 없다). 종류마다 하나는 남기고, 집은 철거할 수 없어 대상이 아니다.
+    private static bool TryRebalance(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
+    {
+        if (world.FreeSlots > 0 || !HasEveryFacility(world)) return false;
+        ProductionType? shortType = heroes.FirstMissingResource(OccupantKind.MeleeHero);
+        if (shortType == null) return false;
+
+        ProductionType? surplusType = null;
+        int bestStock = -1;
+        foreach (ProductionType type in world.BuildableTypes)
+        {
+            if (type == shortType.Value || world.FacilityCount(type) < 2) continue;
+            int stock = world.Resources.GetAmount(type);
+            if (stock < heroes.CostOf(OccupantKind.MeleeHero, type) * SurplusHeroMultiple || stock <= bestStock) continue;
+            bestStock = stock;
+            surplusType = type;
+        }
+        if (surplusType == null) return false;
+
+        ProductionFacility target = null;
+        foreach (ProductionFacility facility in world.Facilities)
+        {
+            if (facility.ProductionType != surplusType.Value) continue;
+            if (target == null || facility.UpgradeCount < target.UpgradeCount) target = facility;
+        }
+        if (target == null || !world.TryReplaceFacility(target, shortType.Value)) return false;
+
+        log.Actions.Add($"재배치 {surplusType.Value}→{shortType.Value}");
+        return true;
     }
 
     private bool TryOneStep(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
