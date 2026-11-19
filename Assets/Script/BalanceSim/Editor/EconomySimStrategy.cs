@@ -97,6 +97,8 @@ public class RuleEconomyStrategy : IEconomySimStrategy
 
     private bool TryHeroAction(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
     {
+        if (!HasEveryFacility(world)) return false;
+
         if (heroes.TryMergeAny(out BalanceHero merged))
         {
             log.Actions.Add($"합성 → {merged.Data.HeroName}(T{merged.Data.Tier})");
@@ -152,11 +154,11 @@ public class RuleEconomyStrategy : IEconomySimStrategy
         {
             // 새 시설을 지어도 채울 시민 한도가 없으면 집부터 - 안 그러면 슬롯을 시설로 다 채워 집을 못 짓는다.
             if (LacksCitizenRoom(world) && TryRaiseCitizenCap(world, log)) return true;
-            if (upgradeBeforeBuild && TryUpgradeFacility(world, log)) return true;
+            if (upgradeBeforeBuild && HasEveryFacility(world) && TryUpgradeFacility(world, log)) return true;
             if (TryBuildFacility(world, log)) return true;
         }
 
-        return TryUpgradeFacility(world, log);
+        return HasEveryFacility(world) && TryUpgradeFacility(world, log);
     }
 
     // 놀고 있는 시민 배치 -> 모자라면 모집 -> 최대 시민이 꽉 찼으면 집 건설/강화.
@@ -187,6 +189,18 @@ public class RuleEconomyStrategy : IEconomySimStrategy
         }
 
         return TryRaiseCitizenCap(world, log);
+    }
+
+    // 생산 시설을 종류마다 하나씩 다 지었는지(슬롯이 꽉 찼으면 더 지을 수 없으니 다 지은 걸로 본다).
+    // 그 전에 영웅·강화에 돌을 써 버리면 채석장을 못 지어 돌 수입이 영영 0으로 굳는다 - 실제 플레이어는 이렇게 하지 않는다.
+    private static bool HasEveryFacility(EconomySimWorld world)
+    {
+        if (world.FreeSlots <= 0) return true;
+        foreach (ProductionType type in world.BuildableTypes)
+        {
+            if (world.FacilityCount(type) == 0) return false;
+        }
+        return true;
     }
 
     // 놀고 있는 시민 + 더 모집할 수 있는 수가 새 시설 하나의 일자리보다 적은지.
