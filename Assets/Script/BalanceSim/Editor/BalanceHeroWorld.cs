@@ -65,6 +65,17 @@ public class BalanceHeroWorld
 
     public int CountByKind(OccupantKind kind) => Roster.FindAll(hero => hero.Kind == kind).Count;
 
+    // 그 종류 영웅의 티어 합(T3 하나 = T1 셋). 합성해도 크게 줄지 않는 "전력" 수.
+    public int TierSumByKind(OccupantKind kind)
+    {
+        int sum = 0;
+        foreach (BalanceHero hero in Roster)
+        {
+            if (hero.Kind == kind) sum += hero.Data.Tier;
+        }
+        return sum;
+    }
+
     public int PoolSize(OccupantKind kind, int tier) =>
         poolByTierAndKind.TryGetValue((kind, tier), out List<HeroData> list) ? list.Count : 0;
 

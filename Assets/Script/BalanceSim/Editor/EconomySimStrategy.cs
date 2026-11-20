@@ -26,8 +26,10 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     private const string RangedLabel = "원거리";
     // 영웅 다음 1명 비용의 몇 배 이상 쌓인 자원을 "남는 자원"으로 볼지(재배치 전략).
     private const int SurplusHeroMultiple = 10;
-    // 열린 지역 하나에 둘 근접 수. 이만큼 채우면 그다음부터는 원거리를 먼저 뽑는다.
-    private const int MeleePerRegion = 4;
+    // 열린 지역 하나에 둘 근접 전력(티어 합). 이만큼 채우면 그다음부터는 원거리를 먼저 뽑는다(기록: 10일차 1지역 근접 7명, 대부분 T1).
+    private const int MeleePerRegion = 6;
+    // 목재·석재 강화를 영웅보다 먼저 하기 전에 갖춰 둘 영웅 수(기록: 1일차에도 근접 2명은 뽑았다 - 첫 밤을 맨몸으로 맞지 않게).
+    private const int MinHeroesBeforeCore = 2;
 
     private readonly Dictionary<ProductionType, int> buildWeights;
     private readonly bool upgradeBeforeBuild;
@@ -210,7 +212,7 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     {
         // 실제 플레이 방식: 목재·석재 시설을 최대 단계까지 먼저 올리고 영웅은 남는 자원으로(기록: 5일차에 목재·석재 4단계,
         // 새 지역 시설도 하루 이틀 안에). 둘 다 건설·강화·영웅에 다 들어가는 자원이라 수입이 먼저 올라야 나머지가 굴러간다.
-        if (playerStyle && HasEveryFacility(world) && TryUpgradeCore(world, log)) return true;
+        if (playerStyle && HasEveryFacility(world) && heroes.Roster.Count >= MinHeroesBeforeCore && TryUpgradeCore(world, log)) return true;
 
         switch (heroPolicy)
         {
@@ -233,13 +235,22 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     {
         if (!HasEveryFacility(world)) return false;
 
-        if (heroes.TryMergeAny(out BalanceHero merged))
+        if (TryMerge(heroes, out BalanceHero merged))
         {
             log.Actions.Add($"합성 → {merged.Data.HeroName}(T{merged.Data.Tier})");
             return true;
         }
 
         if (TryCreateHero(world, heroes, log)) return true;
+
+        // 실제 플레이 방식: 집을 더 못 올려 인구가 꽉 찼으면 낮은 티어부터 합성해 인구를 비운다(T1 셋 = 인구 3 → T2 하나 = 인구 2).
+        // 기록: 영웅이 인구 80을 쓰는 상태에서 합성으로 T2~T4까지 올렸다. T1만 쌓으면 밤마다 수십 명씩 쓰러진다.
+        // 자원이 모자라 못 뽑는 거면 합성해도 소용없다(인구만 비고 또 못 뽑아 묶음이 다 없어질 때까지 합성하게 된다).
+        if (playerStyle && PopulationFull(world) && CanAffordAnyHero(heroes) && TryMergeLowest(heroes, out merged))
+        {
+            log.Actions.Add($"합성(인구) → {merged.Data.HeroName}(T{merged.Data.Tier})");
+            return true;
+        }
 
         if (heroes.TryClassUpgrade(out int heroType))
         {
@@ -279,16 +290,56 @@ public class RuleEconomyStrategy : IEconomySimStrategy
         return false;
     }
 
+    // 기본: 3명이 모이면 바로 합성. 실제 플레이 방식: 그 종류 영웅을 놓을 칸이 다 찼을 때만(인구가 찼을 때는 TryHeroAction에서), 낮은 티어부터(기록: T1을 많이 둔 채
+    // 버티다 배치 칸이 차면 합성 - 시뮬에서도 이른 합성은 영웅 수와 화력을 같이 줄였다). 웨이브를 모르면(전투 끔) 기본대로.
+    private bool TryMerge(BalanceHeroWorld heroes, out BalanceHero merged)
+    {
+        merged = null;
+        BalanceWaveOutlook tonight = heroes.Tonight;
+        if (!playerStyle || tonight == null) return heroes.TryMergeAny(out merged);
+
+        foreach (OccupantKind kind in new[] { OccupantKind.MeleeHero, OccupantKind.RangedHero })
+        {
+            int slots = kind == OccupantKind.MeleeHero ? tonight.MeleeSlots : tonight.RangedSlots;
+            if (heroes.CountByKind(kind) < slots) continue;
+            for (int tier = 1; tier < EconomySimRunner.MaxHeroTier; tier++)
+            {
+                if (heroes.TryMerge(kind, tier, out merged)) return true;
+            }
+        }
+        return false;
+    }
+
+    // 시민 한도까지 다 찼고 놀고 있는 시민도 없다(집 강화도 못 한 뒤).
+    private static bool PopulationFull(EconomySimWorld world) =>
+        !world.Citizens.CheckCanUseCitizen() && world.Citizens.CurrentCitizen >= world.Citizens.MaxCitizen;
+
+    private static bool CanAffordAnyHero(BalanceHeroWorld heroes) =>
+        heroes.CanAfford(OccupantKind.MeleeHero) || heroes.CanAfford(OccupantKind.RangedHero);
+
+    // 가장 낮은 티어부터, 종류는 상관없이 3명이 모인 묶음 하나.
+    private static bool TryMergeLowest(BalanceHeroWorld heroes, out BalanceHero merged)
+    {
+        merged = null;
+        for (int tier = 1; tier < EconomySimRunner.MaxHeroTier; tier++)
+        {
+            if (heroes.TryMerge(OccupantKind.RangedHero, tier, out merged) || heroes.TryMerge(OccupantKind.MeleeHero, tier, out merged)) return true;
+        }
+        return false;
+    }
+
     // 근접은 탱커(저지)라 지상 적이 나오는 지역마다 막을 만큼만 뽑고, 화력은 원거리로 올린다(실제 플레이: 지역당 근접 4~5명).
     // 오늘 밤 웨이브(스테이지 정보)를 보고 정한다: 공중만 나오는 지역 몫의 근접은 뽑지 않고(그만큼 원거리),
     // 은신·잠행이 나오면 막아야만 맞으니 근접을 원거리 수만큼까지 더 뽑는다. 전투를 끄면 열린 지역 수로 센다.
+    // 수는 티어 합으로 센다(T3 하나 = T1 셋) - 명 수로 세면 합성할 때마다 근접이 기준 아래로 떨어져 근접만 계속 뽑는다.
     private static OccupantKind FirstHeroKind(EconomySimWorld world, BalanceHeroWorld heroes)
     {
         BalanceWaveOutlook tonight = heroes.Tonight;
         int groundRegions = tonight != null ? tonight.GroundRegions : world.UnlockedRegionCount;
         int meleeTarget = MeleePerRegion * System.Math.Max(1, groundRegions);
-        if (tonight != null && tonight.Hidden) meleeTarget = System.Math.Max(meleeTarget, heroes.CountByKind(OccupantKind.RangedHero));
-        return heroes.CountByKind(OccupantKind.MeleeHero) < meleeTarget ? OccupantKind.MeleeHero : OccupantKind.RangedHero;
+        int melee = heroes.TierSumByKind(OccupantKind.MeleeHero);
+        if (tonight != null && tonight.Hidden) meleeTarget = System.Math.Max(meleeTarget, heroes.TierSumByKind(OccupantKind.RangedHero));
+        return melee < meleeTarget ? OccupantKind.MeleeHero : OccupantKind.RangedHero;
     }
 
     // ── 경제 ──

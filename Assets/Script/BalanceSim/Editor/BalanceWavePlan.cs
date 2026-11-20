@@ -29,6 +29,8 @@ public class BalanceWaveOutlook
     public int GroundRegions;  // 지상 적이 나오는 지역 수(근접이 막을 자리가 있는 곳)
     public bool Hidden;        // 은신·잠행 - 저지당해야만 맞는다
     public bool Air;           // 공중 - 근접은 막지도 때리지도 못한다
+    public int MeleeSlots;     // 열린 지역의 근접·원거리 배치 칸 수 합(이보다 많이 뽑으면 놓을 데가 없다)
+    public int RangedSlots;
 
     public static BalanceWaveOutlook For(BalanceBattleAssets assets, int day)
     {
@@ -43,6 +45,8 @@ public class BalanceWaveOutlook
                 else ground = true;
             }
             if (ground) outlook.GroundRegions++;
+            outlook.MeleeSlots += plan.Region.MeleeTiles.Count;
+            outlook.RangedSlots += plan.Region.RangedTiles.Count;
         }
         return outlook;
     }
