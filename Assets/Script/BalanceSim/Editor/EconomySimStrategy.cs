@@ -30,6 +30,8 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     private const int MeleePerRegion = 6;
     // 목재·석재 강화를 영웅보다 먼저 하기 전에 갖춰 둘 영웅 수(기록: 1일차에도 근접 2명은 뽑았다 - 첫 밤을 맨몸으로 맞지 않게).
     private const int MinHeroesBeforeCore = 2;
+    // 실제 플레이 방식의 직업 강화 목표 단계 = 일차 × 이 값(반올림).
+    private const float ClassLevelPerDay = 0.42f;
 
     private readonly Dictionary<ProductionType, int> buildWeights;
     private readonly bool upgradeBeforeBuild;
@@ -241,12 +243,16 @@ public class RuleEconomyStrategy : IEconomySimStrategy
             return true;
         }
 
+        // 실제 플레이 방식: 직업 강화는 날짜에 맞춰 꾸준히, 영웅보다 먼저(기록: 10일차 4, 20일차 8~9, 30일차 11~13 ≈ 일차 × 0.42).
+        // 기본 규칙은 영웅을 더 못 뽑을 때만 올려 뒤로 밀린다.
+        if (playerStyle && TryClassOnSchedule(heroes, log)) return true;
+
         if (TryCreateHero(world, heroes, log)) return true;
 
-        // 실제 플레이 방식: 집을 더 못 올려 인구가 꽉 찼으면 낮은 티어부터 합성해 인구를 비운다(T1 셋 = 인구 3 → T2 하나 = 인구 2).
+        // 실제 플레이 방식: 집을 더 못 올려 인구가 꽉 찼으면 높은 티어부터 합성해 인구를 비운다(T1 셋 = 인구 3 → T2 하나 = 인구 2).
         // 기록: 영웅이 인구 80을 쓰는 상태에서 합성으로 T2~T4까지 올렸다. T1만 쌓으면 밤마다 수십 명씩 쓰러진다.
         // 자원이 모자라 못 뽑는 거면 합성해도 소용없다(인구만 비고 또 못 뽑아 묶음이 다 없어질 때까지 합성하게 된다).
-        if (playerStyle && PopulationFull(world) && CanAffordAnyHero(heroes) && TryMergeLowest(heroes, out merged))
+        if (playerStyle && PopulationFull(world) && CanAffordAnyHero(heroes) && TryMergeHighest(heroes, out merged))
         {
             log.Actions.Add($"합성(인구) → {merged.Data.HeroName}(T{merged.Data.Tier})");
             return true;
@@ -317,11 +323,33 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     private static bool CanAffordAnyHero(BalanceHeroWorld heroes) =>
         heroes.CanAfford(OccupantKind.MeleeHero) || heroes.CanAfford(OccupantKind.RangedHero);
 
-    // 가장 낮은 티어부터, 종류는 상관없이 3명이 모인 묶음 하나.
-    private static bool TryMergeLowest(BalanceHeroWorld heroes, out BalanceHero merged)
+    // 보유한 종류 중 목표 단계(일차 × ClassLevelPerDay)보다 낮은 직업을, 낮은 쪽부터 하나 올린다.
+    private static bool TryClassOnSchedule(BalanceHeroWorld heroes, EconomySimDayLog log)
+    {
+        int target = UnityEngine.Mathf.RoundToInt(log.Day * ClassLevelPerDay);
+        int melee = heroes.ClassUpgrades.GetLevel(BalanceHero.MeleeHeroType);
+        int ranged = heroes.ClassUpgrades.GetLevel(BalanceHero.RangedHeroType);
+        int[] order = melee <= ranged
+            ? new[] { BalanceHero.MeleeHeroType, BalanceHero.RangedHeroType }
+            : new[] { BalanceHero.RangedHeroType, BalanceHero.MeleeHeroType };
+        foreach (int heroType in order)
+        {
+            OccupantKind kind = heroType == BalanceHero.RangedHeroType ? OccupantKind.RangedHero : OccupantKind.MeleeHero;
+            if (heroes.CountByKind(kind) == 0 || heroes.ClassUpgrades.GetLevel(heroType) >= target) continue;
+            if (!heroes.TryClassUpgrade(heroType)) continue;
+            string label = heroType == BalanceHero.RangedHeroType ? RangedLabel : MeleeLabel;
+            log.Actions.Add($"{label} 직업 강화 {heroes.ClassUpgrades.GetLevel(heroType)}");
+            return true;
+        }
+        return false;
+    }
+
+    // 가장 높은 티어부터, 종류는 상관없이 3명이 모인 묶음 하나. 높은 티어끼리 합치면 인구도 더 비고(T3 셋 = 인구 9 → T4 = 4)
+    // T4까지 올라간다(기록: 26일차부터 T4 - 낮은 티어부터 합치면 같은 T3 셋이 모이지 않아 T4가 안 나온다).
+    private static bool TryMergeHighest(BalanceHeroWorld heroes, out BalanceHero merged)
     {
         merged = null;
-        for (int tier = 1; tier < EconomySimRunner.MaxHeroTier; tier++)
+        for (int tier = EconomySimRunner.MaxHeroTier - 1; tier >= 1; tier--)
         {
             if (heroes.TryMerge(OccupantKind.RangedHero, tier, out merged) || heroes.TryMerge(OccupantKind.MeleeHero, tier, out merged)) return true;
         }
@@ -500,19 +528,27 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     // 목재·석재 시설 중 최대가 아닌 것을 단계가 낮은 것부터(같으면 남은 양이 적은 쪽 - 둘을 짝으로 올린다).
     private static bool TryUpgradeCore(EconomySimWorld world, EconomySimDayLog log)
     {
+        ProductionFacility pick = PickUpgrade(world, type => type == ProductionType.Wood || type == ProductionType.Stone);
+        // 목재·석재가 다 최대면 식량 시설(기록: 3·6·7·8일차에 올려 8일차 최대 - 시민 모집·영웅에 식량이 계속 든다).
+        if (pick == null && LowestCore(world) == null) pick = PickUpgrade(world, type => type == ProductionType.Food);
+        if (pick == null || !EconomySimWorld.TryUpgrade(pick)) return false;
+        log.Actions.Add($"{pick.ProductionType} 강화 {pick.UpgradeCount}");
+        return true;
+    }
+
+    // 그 종류 시설 중 지금 강화할 수 있는 것을 단계가 낮은 것부터(같으면 남은 양이 적은 자원 쪽).
+    private static ProductionFacility PickUpgrade(EconomySimWorld world, System.Predicate<ProductionType> types)
+    {
         ProductionFacility pick = null;
         foreach (ProductionFacility facility in world.Facilities)
         {
-            if (facility.ProductionType != ProductionType.Wood && facility.ProductionType != ProductionType.Stone) continue;
+            if (!types(facility.ProductionType)) continue;
             if (facility.UpgradeCount >= facility.MaxUpgrade || !facility.CheckCanUpgrade()) continue;
             if (pick == null || facility.UpgradeCount < pick.UpgradeCount
                 || (facility.UpgradeCount == pick.UpgradeCount
                     && world.Resources.GetAmount(facility.ProductionType) < world.Resources.GetAmount(pick.ProductionType))) pick = facility;
         }
-
-        if (pick == null || !EconomySimWorld.TryUpgrade(pick)) return false;
-        log.Actions.Add($"{pick.ProductionType} 강화 {pick.UpgradeCount}");
-        return true;
+        return pick;
     }
 
     // 강화 단계가 가장 낮은 시설부터 강화한다. 실제 플레이 방식은 같은 단계면 남은 양이 적은 자원 쪽부터(목재·석재를 고르게).
