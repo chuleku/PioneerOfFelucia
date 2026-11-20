@@ -249,10 +249,10 @@ public class RuleEconomyStrategy : IEconomySimStrategy
 
         if (TryCreateHero(world, heroes, log)) return true;
 
-        // 실제 플레이 방식: 집을 더 못 올려 인구가 꽉 찼으면 높은 티어부터 합성해 인구를 비운다(T1 셋 = 인구 3 → T2 하나 = 인구 2).
+        // 실제 플레이 방식: 집을 더 못 올려 인구가 꽉 찼으면 합성해 인구를 비운다(T1 셋 = 인구 3 → T2 하나 = 인구 2).
         // 기록: 영웅이 인구 80을 쓰는 상태에서 합성으로 T2~T4까지 올렸다. T1만 쌓으면 밤마다 수십 명씩 쓰러진다.
         // 자원이 모자라 못 뽑는 거면 합성해도 소용없다(인구만 비고 또 못 뽑아 묶음이 다 없어질 때까지 합성하게 된다).
-        if (playerStyle && PopulationFull(world) && CanAffordAnyHero(heroes) && TryMergeHighest(heroes, out merged))
+        if (playerStyle && PopulationFull(world) && CanAffordAnyHero(heroes) && TryMergeForPopulation(heroes, out merged))
         {
             log.Actions.Add($"합성(인구) → {merged.Data.HeroName}(T{merged.Data.Tier})");
             return true;
@@ -344,17 +344,22 @@ public class RuleEconomyStrategy : IEconomySimStrategy
         return false;
     }
 
-    // 가장 높은 티어부터, 종류는 상관없이 3명이 모인 묶음 하나. 높은 티어끼리 합치면 인구도 더 비고(T3 셋 = 인구 9 → T4 = 4)
-    // T4까지 올라간다(기록: 26일차부터 T4 - 낮은 티어부터 합치면 같은 T3 셋이 모이지 않아 T4가 안 나온다).
-    private static bool TryMergeHighest(BalanceHeroWorld heroes, out BalanceHero merged)
+    // T4로 가는 묶음(같은 T3 셋)이 있으면 그것부터, 없으면 낮은 티어부터. 종류는 상관없다.
+    // 낮은 티어부터만 합치면 T1 묶음이 늘 먼저라 T4가 안 나오고(기록: 26일차부터 T4), 높은 티어부터만 합치면 T1이 안 줄어
+    // 밤마다 수십 명씩 쓰러진다 - 기록은 모든 티어를 고르게 합쳤다.
+    private static bool TryMergeForPopulation(BalanceHeroWorld heroes, out BalanceHero merged)
     {
-        merged = null;
-        for (int tier = EconomySimRunner.MaxHeroTier - 1; tier >= 1; tier--)
+        int topSource = EconomySimRunner.MaxHeroTier - 1;
+        if (MergeTier(heroes, topSource, out merged)) return true;
+        for (int tier = 1; tier < topSource; tier++)
         {
-            if (heroes.TryMerge(OccupantKind.RangedHero, tier, out merged) || heroes.TryMerge(OccupantKind.MeleeHero, tier, out merged)) return true;
+            if (MergeTier(heroes, tier, out merged)) return true;
         }
         return false;
     }
+
+    private static bool MergeTier(BalanceHeroWorld heroes, int tier, out BalanceHero merged) =>
+        heroes.TryMerge(OccupantKind.RangedHero, tier, out merged) || heroes.TryMerge(OccupantKind.MeleeHero, tier, out merged);
 
     // 근접은 탱커(저지)라 지상 적이 나오는 지역마다 막을 만큼만 뽑고, 화력은 원거리로 올린다(실제 플레이: 지역당 근접 4~5명).
     // 오늘 밤 웨이브(스테이지 정보)를 보고 정한다: 공중만 나오는 지역 몫의 근접은 뽑지 않고(그만큼 원거리),
