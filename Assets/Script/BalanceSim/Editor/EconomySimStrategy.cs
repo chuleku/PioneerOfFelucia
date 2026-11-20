@@ -135,6 +135,12 @@ public class RuleEconomyStrategy : IEconomySimStrategy
             trades = ReplayEconomyStrategy.TradesFor(world, world.BuildCost(buildType));
             if (trades.Count > world.Resources.Special) return false;
         }
+        // 그다음은 목재·석재 시설 강화비(기록: 펠리움→목재+석재 후 바로 강화).
+        if ((trades == null || trades.Count == 0) && HasEveryFacility(world) && LowestCore(world) is ProductionFacility core)
+        {
+            trades = ReplayEconomyStrategy.TradesFor(world, core.UpgradeCostCopy);
+            if (trades.Count > world.Resources.Special) return false;
+        }
         if (trades == null || trades.Count == 0)
         {
             if (!UsesHeroes || !HasEveryFacility(world)) return false;
@@ -202,6 +208,10 @@ public class RuleEconomyStrategy : IEconomySimStrategy
 
     private bool TryOneStep(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
     {
+        // 실제 플레이 방식: 목재·석재 시설을 최대 단계까지 먼저 올리고 영웅은 남는 자원으로(기록: 5일차에 목재·석재 4단계,
+        // 새 지역 시설도 하루 이틀 안에). 둘 다 건설·강화·영웅에 다 들어가는 자원이라 수입이 먼저 올라야 나머지가 굴러간다.
+        if (playerStyle && HasEveryFacility(world) && TryUpgradeCore(world, log)) return true;
+
         switch (heroPolicy)
         {
             case HeroSpendPolicy.AfterEconomy:
@@ -252,6 +262,9 @@ public class RuleEconomyStrategy : IEconomySimStrategy
         {
             // 자원이 모자라 어차피 못 만들 때는 시민을 모집하지 않는다.
             if (!heroes.CanAfford(first) && !heroes.CanAfford(second)) return false;
+            // 실제 플레이 방식: 시민 한도가 꽉 찼으면 집을 강화(지역마다 하나까지는 건설)해 한도를 늘리고 바로 모집한다
+            // (기록: 이틀마다 집 강화 → 모집, 26일차 시민 170). 기본 규칙은 일꾼 자리를 채울 때만 한도를 늘려 영웅이 인구에 막힌다.
+            if (playerStyle && world.Citizens.CurrentCitizen >= world.Citizens.MaxCitizen && !TryRaiseCitizenCap(world, log)) return false;
             if (world.Recruit(1) == 0) return false;
             log.Actions.Add("모집 1");
         }
@@ -418,6 +431,37 @@ public class RuleEconomyStrategy : IEconomySimStrategy
             pick = type;
         }
         return pick;
+    }
+
+    // 최대 단계가 아닌 목재·석재 시설 중 가장 낮은 것(자원과 상관없이). 없으면 null.
+    private static ProductionFacility LowestCore(EconomySimWorld world)
+    {
+        ProductionFacility pick = null;
+        foreach (ProductionFacility facility in world.Facilities)
+        {
+            if (facility.ProductionType != ProductionType.Wood && facility.ProductionType != ProductionType.Stone) continue;
+            if (facility.UpgradeCount >= facility.MaxUpgrade) continue;
+            if (pick == null || facility.UpgradeCount < pick.UpgradeCount) pick = facility;
+        }
+        return pick;
+    }
+
+    // 목재·석재 시설 중 최대가 아닌 것을 단계가 낮은 것부터(같으면 남은 양이 적은 쪽 - 둘을 짝으로 올린다).
+    private static bool TryUpgradeCore(EconomySimWorld world, EconomySimDayLog log)
+    {
+        ProductionFacility pick = null;
+        foreach (ProductionFacility facility in world.Facilities)
+        {
+            if (facility.ProductionType != ProductionType.Wood && facility.ProductionType != ProductionType.Stone) continue;
+            if (facility.UpgradeCount >= facility.MaxUpgrade || !facility.CheckCanUpgrade()) continue;
+            if (pick == null || facility.UpgradeCount < pick.UpgradeCount
+                || (facility.UpgradeCount == pick.UpgradeCount
+                    && world.Resources.GetAmount(facility.ProductionType) < world.Resources.GetAmount(pick.ProductionType))) pick = facility;
+        }
+
+        if (pick == null || !EconomySimWorld.TryUpgrade(pick)) return false;
+        log.Actions.Add($"{pick.ProductionType} 강화 {pick.UpgradeCount}");
+        return true;
     }
 
     // 강화 단계가 가장 낮은 시설부터 강화한다. 실제 플레이 방식은 같은 단계면 남은 양이 적은 자원 쪽부터(목재·석재를 고르게).
