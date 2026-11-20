@@ -2,16 +2,17 @@ using System.Collections.Generic;
 using UnityEngine;
 
 // 플레이어 스킬(밤에 마나로 까는 장판, PlayerGroundZoneEffect)을 전투에 넣는다.
-// 언제 어디에 쓸지는 실제 입력이 없어 아래 규칙으로 정한다(한 칸에 하나만, 우선순위 힐 > 공격 버프 > 둔화):
-//   힐   - 영웅 체력이 40% 아래로 떨어지면, 다친 양이 가장 많이 들어가는 영웅 칸에
-//   버프 - 영웅 사거리 안에 적이 4마리 이상이거나 보스가 들어오면, 화력(DPS) 합이 가장 큰 영웅 칸에
-//   둔화 - 막히지 않은 지상 적이 3마리 이상 뭉쳐 있거나 보스가 지나가면, 영웅 사거리가 닿는 그 적 칸에
-// 같은 종류 장판이 이미 그 자리를 덮고 있으면 다시 쓰지 않는다.
+// 언제 어디에 쓸지는 실제 플레이 기록(1~30일차)에 맞춘다 - 공격 버프 위주, 위험해 보이는 지역에 마나가 되는 대로.
+// 마나는 막기 힘든 지역이 먼저 쓴다(RunGroups가 그 순서로 돌린다). 우선순위 공격 버프 > 힐 > 둔화:
+//   버프 - 보스가 사거리에 들거나, 사거리 안 적이 3마리 이상이거나, 막히지 않은 적이 경로 절반을 넘으면
+//          화력(DPS) 합이 가장 큰 영웅 칸에(이미 버프 장판이 덮은 칸은 빼고)
+//   힐   - 영웅 체력이 40% 아래로 떨어지면, 다친 양이 가장 많이 들어가는 영웅 칸에(버프를 안 쓸 때만)
+//   둔화 - 보스가 막히지 않고 지나갈 때만, 영웅 사거리가 닿는 그 칸에
 public static partial class BalanceBattle
 {
     private const float HealHpRatio = 0.4f;
-    private const int BuffMinEnemies = 4;
-    private const int SlowMinEnemies = 3;
+    private const int BuffMinEnemies = 3;
+    private const float LeakRiskProgress = 0.5f;
     private const float ManaEpsilon = 0.001f;
     private const float MinTickSeconds = 0.05f;    // tickInterval 0(매 프레임) 장판이 무한 반복되지 않게
     private const float DecisionSeconds = 0.5f;    // 스킬을 쓸지 이 간격으로만 따진다(사람 반응 속도 + 계산량)
@@ -26,7 +27,7 @@ public static partial class BalanceBattle
 
     // 밤 하나의 마나 사용 기록. 마나는 지역 전체가 한 통인데 지역은 차례로 돌리므로, 시각별 사용을 모아 두고
     // 새 사용을 끼워 넣어도 어느 시점에 마나가 음수가 되지 않는지 처음부터 다시 따진다
-    // (PlayerManaManager: 밤 시작 때 가득, 밤에만 초당 회복, 최대치에서 멈춤). 먼저 돌린 지역(1지역)이 먼저 쓴다.
+    // (PlayerManaManager: 밤 시작 때 가득, 밤에만 초당 회복, 최대치에서 멈춤). 먼저 돌린 지역(막기 힘든 지역)이 먼저 쓴다.
     private class ManaLedger
     {
         private readonly float max;
@@ -109,8 +110,8 @@ public static partial class BalanceBattle
             ApplyZones(time, heroes, enemies, ref remaining, result);
             if (time < nextDecision) return;
             nextDecision = time + DecisionSeconds;
-            if (TryHeal(time, heroes)) return;
             if (TryBuff(time, heroes, enemies)) return;
+            if (TryHeal(time, heroes)) return;
             TrySlow(time, heroes, enemies);
         }
 
@@ -211,26 +212,32 @@ public static partial class BalanceBattle
             return best != null && Cast(skill, best.Value, time);
         }
 
+        // 위험해 보이는 지역: 보스가 사거리에 있거나, 사거리 안 적이 몰려 있거나, 막히지 않은 적이 경로 절반을 넘었다(곧 샌다).
+        private static bool InDanger(List<BalanceFieldHero> heroes, List<BattleEnemy> enemies)
+        {
+            int inRange = 0;
+            foreach (BattleEnemy enemy in enemies)
+            {
+                if (!enemy.Active) continue;
+                if (enemy.Blocker == null && enemy.Progress >= (enemy.Path.Count - 1) * LeakRiskProgress) return true;
+                if (!heroes.Exists(hero => hero.Alive && CanTarget(hero, enemy))) continue;
+                if (enemy.Group.Class == EnemyClass.Boss) return true;
+                inRange++;
+            }
+            return inRange >= BuffMinEnemies;
+        }
+
         private bool TryBuff(float time, List<BalanceFieldHero> heroes, List<BattleEnemy> enemies)
         {
             BalancePlayerSkill skill = skills.Find(candidate => candidate.Mode == GroundZoneMode.Buff);
-            if (skill == null || zones.Exists(zone => zone.Skill.Mode == GroundZoneMode.Buff) || !mana.CanSpend(time, skill.ManaCost)) return false;
-
-            int inRange = 0;
-            bool bossInRange = false;
-            foreach (BattleEnemy enemy in enemies)
-            {
-                if (!heroes.Exists(hero => hero.Alive && CanTarget(hero, enemy))) continue;
-                inRange++;
-                if (enemy.Group.Class == EnemyClass.Boss) bossInRange = true;
-            }
-            if (inRange < BuffMinEnemies && !bossInRange) return false;
+            if (skill == null || !mana.CanSpend(time, skill.ManaCost)) return false;
+            if (!InDanger(heroes, enemies)) return false;
 
             Vector2Int? best = null;
             float bestDps = 0f;
             foreach (BalanceFieldHero center in heroes)
             {
-                if (!center.Alive) continue;
+                if (!center.Alive || Covered(GroundZoneMode.Buff, center.Tile)) continue;
                 float dps = 0f;
                 foreach (BalanceFieldHero hero in heroes)
                 {
@@ -263,7 +270,7 @@ public static partial class BalanceBattle
                     count++;
                     if (enemy.Group.Class == EnemyClass.Boss) boss = true;
                 }
-                if ((count < SlowMinEnemies && !boss) || count <= bestCount) continue;
+                if (!boss || count <= bestCount) continue;
                 bestCount = count;
                 best = center.Tile;
             }

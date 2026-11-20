@@ -152,9 +152,15 @@ public static partial class BalanceBattle
         bool auto = assets.Placement == BalancePlacement.Auto;
         BalancePlacement[] modes = auto ? ManualPlacements : new[] { assets.Placement };
         var run = new NightRun { Total = new BalanceNightResult { Placement = assets.Placement } };
-        // 마나는 지역 전체가 한 통이다. 앞 지역(1지역부터)이 쓴 스킬을 기록해 두고 다음 지역은 남은 마나로 쓴다.
+        var results = new BalanceNightResult[plans.Count];
+        var chosen = new BalancePlacement[plans.Count];
+        // 마나는 지역 전체가 한 통이다. 먼저 돌린 지역이 쓴 스킬을 기록해 두고 다음 지역은 남은 마나로 쓴다.
+        // 가장 힘든 지역(배치 화력 대비 적 체력이 큰 곳)부터 돌려 그쪽이 먼저 쓰게 한다 - 실제로도 막기 힘든 쪽에 버프를 더 깐다.
+        var order = new List<int>();
+        for (int index = 0; index < plans.Count; index++) order.Add(index);
+        order.Sort((left, right) => Pressure(plans[right], groups[right]).CompareTo(Pressure(plans[left], groups[left])));
         ManaLedger mana = NewLedger(assets);
-        for (int index = 0; index < plans.Count; index++)
+        foreach (int index in order)
         {
             BalanceNightResult best = null;
             BalancePlacement bestPlacement = modes[0];
@@ -173,11 +179,27 @@ public static partial class BalanceBattle
                 bestUnplaced = groups[index].Count - placed.Count;
             }
             mana = bestMana;
-            run.Regions.Add(best);
+            results[index] = best;
+            chosen[index] = bestPlacement;
             run.Unplaced += bestUnplaced;
-            AddRegion(run.Total, best, auto ? bestPlacement : null);
+        }
+        // 결과·요약은 지역 번호 순서로 적는다.
+        for (int index = 0; index < plans.Count; index++)
+        {
+            run.Regions.Add(results[index]);
+            AddRegion(run.Total, results[index], auto ? chosen[index] : null);
         }
         return run;
+    }
+
+    // 배치된 화력 대비 적 체력 합(클수록 막기 힘든 지역).
+    private static float Pressure(BalanceNightPlan plan, List<BalanceFieldHero> group)
+    {
+        float threat = 0f;
+        foreach (BalanceSpawnGroup spawn in plan.Groups) threat += spawn.Hp * spawn.Count;
+        float dps = 0f;
+        foreach (BalanceFieldHero hero in group) dps += hero.Dps;
+        return threat / (dps + 1f);
     }
 
     // 지역 하나의 결과를 밤 전체 합에 더한다. 자동이면 요약 앞에 그 지역에서 고른 배치 방식을 붙인다.
