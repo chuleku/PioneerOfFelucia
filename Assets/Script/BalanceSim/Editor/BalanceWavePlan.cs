@@ -18,8 +18,34 @@ public class BalanceSpawnGroup
     public float Defense;
     public float TilesPerSecond;
     public float AttackCycle;   // 공격 한 번 주기(초) = 1/공속 + 공격 모션 길이(BalanceEnemyMotion)
+    public DebuffType ImmuneDebuffs; // 프리팹의 디버프 면역(플레이어 둔화 장판 판정)
     public float MovingShare;   // 영웅을 때리며 걷는 동안 실제로 움직이는 시간 비율(모션 중엔 멈춘다)
     public string Source;     // "일반" / "증원" / "보스"
+}
+
+// 오늘 밤 웨이브 요약(인게임 스테이지 정보 툴팁으로 낮에 미리 볼 수 있는 것). 봇이 어떤 영웅을 뽑을지 정할 때 본다.
+public class BalanceWaveOutlook
+{
+    public int GroundRegions;  // 지상 적이 나오는 지역 수(근접이 막을 자리가 있는 곳)
+    public bool Hidden;        // 은신·잠행 - 저지당해야만 맞는다
+    public bool Air;           // 공중 - 근접은 막지도 때리지도 못한다
+
+    public static BalanceWaveOutlook For(BalanceBattleAssets assets, int day)
+    {
+        var outlook = new BalanceWaveOutlook();
+        foreach (BalanceNightPlan plan in BalanceWavePlan.Build(assets, day))
+        {
+            bool ground = false;
+            foreach (BalanceSpawnGroup group in plan.Groups)
+            {
+                if ((group.Attribute & (EnemyAttribute.Cloaking | EnemyAttribute.Burrow)) != 0) outlook.Hidden = true;
+                if ((group.Attribute & EnemyAttribute.Fly) != 0) outlook.Air = true;
+                else ground = true;
+            }
+            if (ground) outlook.GroundRegions++;
+        }
+        return outlook;
+    }
 }
 
 // 지역 하나의 하룻밤 계획.
@@ -153,6 +179,7 @@ public static class BalanceWavePlan
             TilesPerSecond = enemy.MoveSpeed / plan.Region.CellSize,
             AttackCycle = BalanceEnemyMotion.AttackCycle(wave.Prefab, enemy.AttackSpeed),
             MovingShare = BalanceEnemyMotion.MovingShare(wave.Prefab, enemy.AttackSpeed),
+            ImmuneDebuffs = BalanceEnemyMotion.ImmuneDebuffs(wave.Prefab),
             Source = source,
         });
     }

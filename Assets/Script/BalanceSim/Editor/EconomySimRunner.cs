@@ -119,6 +119,7 @@ public static class EconomySimRunner
             var log = new EconomySimDayLog { Day = day };
             world.SetUnlockedRegions(StartingRegions + (day - FirstDay) / RegionUnlockInterval);
             heroes.StartDay();
+            heroes.Tonight = useBattle ? BalanceWaveOutlook.For(battle, day) : null;
 
             int[] before = Snapshot(world.Resources);
             strategy.PlayDay(world, heroes, log);

@@ -50,7 +50,9 @@ public class BalanceFieldHero
     public int Blocking;
     public object Target;   // 지금 잡고 있는 적(BalanceBattle.BattleEnemy). 죽거나 사거리를 벗어나면 새로 잡는다
     public bool Alive => Hp > 0f;
-    public readonly Dictionary<int, float> HitByDefense = new(); // 적 방어력별 평균 1타(HeroSimCalc) 캐시
+    public float SkillAttackScale = 1f;  // 플레이어 공격 버프 장판 안이면 ATK 배율(매 칸 다시 계산)
+    public float SkillAttackSpeedAdd;    // 같은 장판의 AS 가산
+    public readonly Dictionary<(int Defense, float AttackScale), float> HitByDefense = new(); // 적 방어력·버프 배율별 평균 1타(HeroSimCalc) 캐시
 }
 
 // 칸 사이 사거리 판정. TileShapeQuery(맵 코드)와 같은 모양: 마름모=맨해튼, 정사각=체비셰프, 십자=같은 줄.
@@ -74,7 +76,7 @@ public static class BalanceRange
 
 // 하룻밤을 지역별로 돌린다: 포탈 고르기 -> 영웅 배치 -> 0.25초 단위로 적 이동·저지·공격·누수.
 // 단순화(옮기지 않은 것): 적·영웅 스킬, 오라·버프·디버프, 장판, 힐, 재생·폭주·화염 특성, 체인 공격.
-public static class BalanceBattle
+public static partial class BalanceBattle
 {
     private const float StepSeconds = 0.25f;
     private const float MaxNightSeconds = 600f;      // 이 시간 안에 안 끝나면 남은 적은 새어 나간 것으로 본다
@@ -93,48 +95,93 @@ public static class BalanceBattle
     private const string PortalSeedSuffix = ":portal";
     private const string PathSeedSuffix = ":path";
     private const float PercentScale = 100f;
+    // 지역 간 재배치: 한 밤에 최대 몇 명까지 옮겨 보고, 한 번 옮길 때 후보를 몇 명까지 시험할지(밤 하나를 그만큼 더 돌린다).
+    private const int MaxRegionMoves = 6;
+    private const int MaxMoveTrials = 3;
 
     // ── 밤 하나 ──
 
+    // 같은 밤을 지역 배분만 바꿔 다시 돌려 볼 때의 한 판 결과.
+    private class NightRun
+    {
+        public BalanceNightResult Total;
+        public readonly List<BalanceNightResult> Regions = new();
+        public int Unplaced;   // 지역에 배분됐지만 칸이 없어 못 놓은 영웅
+    }
+
+    // 영웅을 지역에 나눠(Assign) 밤을 돌린 뒤, 새는 지역과 안 새는 지역이 같이 있으면 안 새는 쪽 영웅을 한 명씩
+    // 새는 쪽으로 옮겨 다시 돌려 본다(실제 플레이어가 1지역 영웅을 2지역으로 옮기는 재배치). 나아지지 않으면 멈춘다.
+    // 같은 시드라 적 구성·포탈은 그대로고 배치만 다르다.
     public static BalanceNightResult RunNight(BalanceBattleAssets assets, BalanceHeroWorld heroes, int day, string seed)
     {
-        if (assets.Placement != BalancePlacement.Auto) return RunNight(assets, heroes, day, seed, assets.Placement);
-
-        // 같은 시드라 적 구성·포탈은 그대로고 배치만 다르다. 어느 영웅이 어느 지역에 가는지(PickRegion)는
-        // 배치 방식과 상관없어서, 지역마다 따로 가장 나은 방식을 고른다(실제로도 1지역은 나눠 세우고 2지역은 본진 앞에 모은다).
-        var result = new BalanceNightResult { Placement = BalancePlacement.Auto };
         List<BalanceNightPlan> plans = BalanceWavePlan.Build(assets, day);
         var activeLanes = new List<List<int>>();
         foreach (BalanceNightPlan plan in plans) activeLanes.Add(PickActiveLanes(plan, seed, day));
 
-        var placedByMode = new Dictionary<BalancePlacement, List<List<BalanceFieldHero>>>();
-        foreach (BalancePlacement placement in ManualPlacements)
+        List<BalanceFieldHero> roster = BuildRoster(heroes, assets);
+        List<List<BalanceFieldHero>> groups = Assign(roster, plans, out int inventory);
+        NightRun best = RunGroups(assets, plans, activeLanes, groups, seed, day);
+        int moves = 0;
+        for (; moves < MaxRegionMoves; moves++)
         {
-            var placeResult = new BalanceNightResult();
-            placedByMode[placement] = Place(heroes, plans, activeLanes, placeResult, assets, placement);
-            result.Placed = placeResult.Placed;
-            result.Inventory = placeResult.Inventory;
+            NightRun improved = null;
+            foreach (List<List<BalanceFieldHero>> moved in MoveCandidates(best, groups, plans))
+            {
+                NightRun trial = RunGroups(assets, plans, activeLanes, moved, seed, day);
+                if (!IsBetter(trial.Total, best.Total)) continue;
+                improved = trial;
+                groups = moved;
+                break;
+            }
+            if (improved == null) break;
+            best = improved;
         }
 
-        for (int index = 0; index < plans.Count; index++)
-        {
-            BalanceNightResult best = null;
-            BalancePlacement bestPlacement = BalancePlacement.Auto;
-            foreach (BalancePlacement placement in ManualPlacements)
-            {
-                var region = new BalanceNightResult();
-                RunRegion(plans[index], activeLanes[index], placedByMode[placement][index], seed, day, region);
-                if (best != null && !IsBetter(region, best)) continue;
-                best = region;
-                bestPlacement = placement;
-            }
-            AddRegion(result, best, bestPlacement);
-        }
+        BalanceNightResult result = best.Total;
+        result.Inventory = inventory + best.Unplaced;
+        result.Placed = roster.Count - result.Inventory;
+        if (moves > 0) result.RegionNotes.Add($"지역 간 재배치 {moves}명");
         return result;
     }
 
-    // 지역 하나의 결과를 밤 전체 합에 더한다. 요약 앞에 그 지역에서 고른 배치 방식을 붙인다.
-    private static void AddRegion(BalanceNightResult night, BalanceNightResult region, BalancePlacement placement)
+    // 지역마다 차례로 돌린다. 자동이면 지역마다 배치 방식 셋을 다 해 보고 가장 나은 쪽을 고른다
+    // (실제로도 1지역은 나눠 세우고 2지역은 본진 앞에 모은다).
+    private static NightRun RunGroups(BalanceBattleAssets assets, List<BalanceNightPlan> plans, List<List<int>> activeLanes,
+        List<List<BalanceFieldHero>> groups, string seed, int day)
+    {
+        bool auto = assets.Placement == BalancePlacement.Auto;
+        BalancePlacement[] modes = auto ? ManualPlacements : new[] { assets.Placement };
+        var run = new NightRun { Total = new BalanceNightResult { Placement = assets.Placement } };
+        // 마나는 지역 전체가 한 통이다. 앞 지역(1지역부터)이 쓴 스킬을 기록해 두고 다음 지역은 남은 마나로 쓴다.
+        ManaLedger mana = NewLedger(assets);
+        for (int index = 0; index < plans.Count; index++)
+        {
+            BalanceNightResult best = null;
+            BalancePlacement bestPlacement = modes[0];
+            ManaLedger bestMana = mana;
+            int bestUnplaced = 0;
+            foreach (BalancePlacement placement in modes)
+            {
+                List<BalanceFieldHero> placed = PlaceRegion(plans[index], activeLanes[index], groups[index], placement);
+                var region = new BalanceNightResult();
+                ManaLedger tried = mana?.Copy();
+                RunRegion(plans[index], activeLanes[index], placed, seed, day, region, SkillsFor(assets, tried));
+                if (best != null && !IsBetter(region, best)) continue;
+                best = region;
+                bestPlacement = placement;
+                bestMana = tried;
+                bestUnplaced = groups[index].Count - placed.Count;
+            }
+            mana = bestMana;
+            run.Regions.Add(best);
+            run.Unplaced += bestUnplaced;
+            AddRegion(run.Total, best, auto ? bestPlacement : null);
+        }
+        return run;
+    }
+
+    // 지역 하나의 결과를 밤 전체 합에 더한다. 자동이면 요약 앞에 그 지역에서 고른 배치 방식을 붙인다.
+    private static void AddRegion(BalanceNightResult night, BalanceNightResult region, BalancePlacement? placement)
     {
         night.Spawned += region.Spawned;
         night.Killed += region.Killed;
@@ -146,7 +193,8 @@ public static class BalanceBattle
         night.HeroDeaths += region.HeroDeaths;
         night.TimedOut |= region.TimedOut;
         night.BossNote ??= region.BossNote;
-        foreach (string note in region.RegionNotes) night.RegionNotes.Add($"[{PlacementName(placement)}] {note}");
+        string prefix = placement != null ? $"[{PlacementName(placement.Value)}] " : string.Empty;
+        foreach (string note in region.RegionNotes) night.RegionNotes.Add(prefix + note);
     }
 
     private static readonly BalancePlacement[] ManualPlacements =
@@ -169,22 +217,6 @@ public static class BalanceBattle
         BalancePlacement.Core => "본진 쪽",
         _ => "자동",
     };
-
-    private static BalanceNightResult RunNight(BalanceBattleAssets assets, BalanceHeroWorld heroes, int day, string seed,
-        BalancePlacement placement)
-    {
-        var result = new BalanceNightResult { Placement = placement };
-        List<BalanceNightPlan> plans = BalanceWavePlan.Build(assets, day);
-        var activeLanes = new List<List<int>>();
-        foreach (BalanceNightPlan plan in plans) activeLanes.Add(PickActiveLanes(plan, seed, day));
-
-        List<List<BalanceFieldHero>> placed = Place(heroes, plans, activeLanes, result, assets, placement);
-        for (int index = 0; index < plans.Count; index++)
-        {
-            RunRegion(plans[index], activeLanes[index], placed[index], seed, day, result);
-        }
-        return result;
-    }
 
     // SpawnerManager.ShowPortal: 보스 밤 1번 지역은 가장 긴 레인 하나, 아니면 포탈 표 개수만큼 섞어서 고른다(시드 고정).
     private static List<int> PickActiveLanes(BalanceNightPlan plan, string seed, int day)
@@ -216,64 +248,155 @@ public static class BalanceBattle
 
     // ── 배치 ──
 
-    // 강한 영웅부터 위협(체력×마릿수) 대비 배치 전력이 가장 모자란 지역에 놓는다. 칸이 없으면 인벤토리에 남는다.
-    private static List<List<BalanceFieldHero>> Place(BalanceHeroWorld heroes, List<BalanceNightPlan> plans,
-        List<List<int>> activeLanes, BalanceNightResult result, BalanceBattleAssets assets, BalancePlacement placement)
+    // 전투에 낼 영웅 전부. 근접(저지 자리)을 먼저 세워야 원거리가 그 칸을 사거리에 넣는 자리를 고를 수 있어 근접 먼저, 같은 종류 안에서는 강한 순.
+    private static List<BalanceFieldHero> BuildRoster(BalanceHeroWorld heroes, BalanceBattleAssets assets)
     {
-        var placed = new List<List<BalanceFieldHero>>();
+        var roster = new List<BalanceFieldHero>();
+        foreach (BalanceHero hero in heroes.Roster)
+        {
+            BalanceFieldHero field = BuildFieldHero(heroes, hero, assets);
+            if (field != null) roster.Add(field);
+        }
+        SortForPlacement(roster);
+        return roster;
+    }
+
+    private static void SortForPlacement(List<BalanceFieldHero> heroes) =>
+        heroes.Sort((left, right) => left.IsMelee != right.IsMelee ? right.IsMelee.CompareTo(left.IsMelee) : right.Dps.CompareTo(left.Dps));
+
+    // 강한 영웅부터 위협(체력×마릿수) 대비 배치 전력이 가장 모자란 지역에 나눈다. 어느 지역에도 칸이 없으면 인벤토리에 남는다.
+    private static List<List<BalanceFieldHero>> Assign(List<BalanceFieldHero> roster, List<BalanceNightPlan> plans, out int inventory)
+    {
+        var groups = new List<List<BalanceFieldHero>>();
         var threat = new List<float>();
         var assigned = new List<float>();
-        var used = new List<HashSet<Vector2Int>>();
         foreach (BalanceNightPlan plan in plans)
         {
-            placed.Add(new List<BalanceFieldHero>());
+            groups.Add(new List<BalanceFieldHero>());
             float total = 0f;
             foreach (BalanceSpawnGroup group in plan.Groups) total += group.Hp * group.Count;
             threat.Add(total);
             assigned.Add(0f);
-            used.Add(new HashSet<Vector2Int>());
         }
 
-        var candidates = new List<BalanceFieldHero>();
-        foreach (BalanceHero hero in heroes.Roster)
+        inventory = 0;
+        foreach (BalanceFieldHero field in roster)
         {
-            BalanceFieldHero field = BuildFieldHero(heroes, hero, assets);
-            if (field != null) candidates.Add(field);
-        }
-        // 근접(저지 자리)을 먼저 다 세워야 원거리가 그 칸을 사거리에 넣는 자리를 고를 수 있다. 같은 종류 안에서는 강한 순.
-        candidates.Sort((left, right) => left.IsMelee != right.IsMelee ? right.IsMelee.CompareTo(left.IsMelee) : right.Dps.CompareTo(left.Dps));
-
-        foreach (BalanceFieldHero field in candidates)
-        {
-            int region = PickRegion(plans, activeLanes, threat, assigned, used, field);
+            int region = PickRegion(plans, groups, threat, assigned, field);
             if (region < 0)
             {
-                result.Inventory++;
+                inventory++;
                 continue;
             }
-            field.Tile = BestTile(plans[region], activeLanes[region], used[region], placed[region], field, placement);
-            used[region].Add(field.Tile);
-            placed[region].Add(field);
+            groups[region].Add(field);
             assigned[region] += field.Dps;
-            result.Placed++;
+        }
+        return groups;
+    }
+
+    // 지역 하나에 나뉜 영웅을 칸에 세운다. 칸이 모자라 못 선 영웅은 돌려준 목록에서 빠진다.
+    private static List<BalanceFieldHero> PlaceRegion(BalanceNightPlan plan, List<int> activeLanes, List<BalanceFieldHero> group,
+        BalancePlacement placement)
+    {
+        var ordered = new List<BalanceFieldHero>(group);
+        SortForPlacement(ordered);
+        var used = new HashSet<Vector2Int>();
+        var placed = new List<BalanceFieldHero>();
+        foreach (BalanceFieldHero field in ordered)
+        {
+            if (!HasFreeTile(plan.Region, used, field.IsMelee)) continue;
+            field.Tile = BestTile(plan, activeLanes, used, placed, field, placement);
+            used.Add(field.Tile);
+            placed.Add(field);
         }
         return placed;
     }
 
-    private static int PickRegion(List<BalanceNightPlan> plans, List<List<int>> activeLanes, List<float> threat,
-        List<float> assigned, List<HashSet<Vector2Int>> used, BalanceFieldHero field)
+    // 위협은 그 영웅이 때릴 수 있는 적만 센다 - 공중만 나오는 지역에 근접을 보내면 막지도 때리지도 못한다.
+    // 어느 지역에서도 때릴 적이 없으면 전체 위협 기준으로 놓는다(필드에 두는 편이 인벤토리보다 낫다).
+    private static int PickRegion(List<BalanceNightPlan> plans, List<List<BalanceFieldHero>> groups, List<float> threat,
+        List<float> assigned, BalanceFieldHero field)
     {
         int best = -1;
-        float bestNeed = float.MinValue;
+        float bestNeed = 0f;
         for (int index = 0; index < plans.Count; index++)
         {
-            if (!HasFreeTile(plans[index].Region, used[index], field.IsMelee)) continue;
-            float need = threat[index] / (assigned[index] + 1f);
+            if (!HasRoom(plans[index].Region, groups[index], field.IsMelee)) continue;
+            float need = UsefulThreat(plans[index], field) / (assigned[index] + 1f);
             if (need <= bestNeed) continue;
             bestNeed = need;
             best = index;
         }
+        if (best >= 0) return best;
+
+        float bestTotal = float.MinValue;
+        for (int index = 0; index < plans.Count; index++)
+        {
+            if (!HasRoom(plans[index].Region, groups[index], field.IsMelee)) continue;
+            float need = threat[index] / (assigned[index] + 1f);
+            if (need <= bestTotal) continue;
+            bestTotal = need;
+            best = index;
+        }
         return best;
+    }
+
+    // 그 종류가 설 수 있는 칸 수보다 적게 나뉘었는지.
+    private static bool HasRoom(BalanceRegion region, List<BalanceFieldHero> group, bool melee)
+    {
+        int count = 0;
+        foreach (BalanceFieldHero hero in group)
+        {
+            if (hero.IsMelee == melee) count++;
+        }
+        return count < (melee ? region.MeleeTiles.Count : region.RangedTiles.Count);
+    }
+
+    // 가장 많이 샌 지역에, 안 샌 지역에서 그 지역 적을 때릴 수 있는 영웅 한 명을 옮긴 배분들.
+    // 약한 영웅부터 해 본다(주는 쪽 손실이 작다). 나아지면 다음 바퀴에 또 옮긴다.
+    private static IEnumerable<List<List<BalanceFieldHero>>> MoveCandidates(NightRun run, List<List<BalanceFieldHero>> groups,
+        List<BalanceNightPlan> plans)
+    {
+        int receiver = -1;
+        for (int index = 0; index < run.Regions.Count; index++)
+        {
+            if (!Leaky(run.Regions[index])) continue;
+            if (receiver < 0 || IsBetter(run.Regions[receiver], run.Regions[index])) receiver = index;
+        }
+        if (receiver < 0) yield break;
+
+        var options = new List<(int Donor, BalanceFieldHero Hero)>();
+        for (int donor = 0; donor < run.Regions.Count; donor++)
+        {
+            if (donor == receiver || Leaky(run.Regions[donor])) continue;
+            foreach (BalanceFieldHero hero in groups[donor])
+            {
+                if (UsefulThreat(plans[receiver], hero) > 0f && HasRoom(plans[receiver].Region, groups[receiver], hero.IsMelee)) options.Add((donor, hero));
+            }
+        }
+        options.Sort((left, right) => left.Hero.Dps.CompareTo(right.Hero.Dps));
+
+        for (int trial = 0; trial < options.Count && trial < MaxMoveTrials; trial++)
+        {
+            var moved = groups.ConvertAll(group => new List<BalanceFieldHero>(group));
+            moved[options[trial].Donor].Remove(options[trial].Hero);
+            moved[receiver].Add(options[trial].Hero);
+            yield return moved;
+        }
+    }
+
+    private static bool Leaky(BalanceNightResult region) => region.BossLeaked || region.BaseDamage > 0;
+
+    // CanTarget과 같은 기준(못 때리는 특성, 은신은 저지당하면 맞으니 제외 안 함).
+    private static float UsefulThreat(BalanceNightPlan plan, BalanceFieldHero field)
+    {
+        float total = 0f;
+        foreach (BalanceSpawnGroup group in plan.Groups)
+        {
+            if ((group.Attribute & field.Unattackable & ~EnemyAttribute.Cloaking) != 0) continue;
+            total += group.Hp * group.Count;
+        }
+        return total;
     }
 
     private static bool HasFreeTile(BalanceRegion region, HashSet<Vector2Int> used, bool melee)
@@ -413,6 +536,8 @@ public static class BalanceBattle
         public BalanceFieldHero Blocker;
         public float BlockedSeconds;  // 저지당해 멈춰 있던 시간(보스 상세용)
         public int MaxHeroesInRange;  // 한 번에 이 적을 사거리에 넣은 영웅 수의 최댓값(보스 상세용)
+        public float SlowedUntil;     // 플레이어 둔화 장판이 마지막으로 건 둔화가 풀리는 시각
+        public float SpeedScale = 1f; // 이번 칸의 이속 배율(둔화 중이면 장판 값)
 
         public Vector2Int Tile => Path[Mathf.Min(Mathf.FloorToInt(Progress), Path.Count - 1)];
         public float Remaining => Path.Count - 1 - Progress;
@@ -421,7 +546,7 @@ public static class BalanceBattle
     }
 
     private static void RunRegion(BalanceNightPlan plan, List<int> activeLanes, List<BalanceFieldHero> heroes,
-        string seed, int day, BalanceNightResult result)
+        string seed, int day, BalanceNightResult result, SkillCaster skills)
     {
         if (activeLanes.Count == 0)
         {
@@ -436,6 +561,8 @@ public static class BalanceBattle
             hero.Cooldown = 0f;
             hero.Blocking = 0;
             hero.Target = null;
+            hero.SkillAttackScale = 1f;
+            hero.SkillAttackSpeedAdd = 0f;
             if (hero.IsMelee) meleeByTile[hero.Tile] = hero;
         }
 
@@ -449,6 +576,7 @@ public static class BalanceBattle
             {
                 if (!enemy.Spawned && enemy.SpawnTime <= time) enemy.Spawned = true;
             }
+            skills?.Step(time, plan.Region, activeLanes, heroes, enemies, ref remaining, result);
             foreach (BalanceFieldHero hero in heroes)
             {
                 if (hero.Alive) HeroAct(hero, enemies, ref remaining, result);
@@ -467,7 +595,8 @@ public static class BalanceBattle
             Leak(enemy, result);
         }
         result.RegionNotes.Add($"지역{plan.Region.Region} 누수 {result.Leaked - leakedBefore}/{enemies.Count} " +
-            $"(근접 {meleeByTile.Count}·저지 칸 {BlockingTiles(meleeByTile, plan.Region, activeLanes)}·원거리 {heroes.Count - meleeByTile.Count}·영웅 사망 {result.HeroDeaths - deathsBefore})");
+            $"(근접 {meleeByTile.Count}·저지 칸 {BlockingTiles(meleeByTile, plan.Region, activeLanes)}·원거리 {heroes.Count - meleeByTile.Count}·영웅 사망 {result.HeroDeaths - deathsBefore}" +
+            $"{skills?.Summary()})");
     }
 
     // 근접 영웅 중 오늘 활성 레인 위에 선 수(실제로 저지할 수 있는 영웅).
@@ -547,7 +676,8 @@ public static class BalanceBattle
             if (hero.AttackType == AttackType.Area) HitArea(hero, targets[index], enemies, ref remaining, result);
             else Hit(hero, targets[index], ref remaining, result);
         }
-        hero.Cooldown += hero.AttackInterval;
+        // 공격 버프의 AS Flat 가산: 간격 = 1 / (공속 + 가산).
+        hero.Cooldown += hero.SkillAttackSpeedAdd > 0f ? 1f / (1f / hero.AttackInterval + hero.SkillAttackSpeedAdd) : hero.AttackInterval;
     }
 
     private static int DistanceSquared(Vector2Int a, Vector2Int b) => (a - b).sqrMagnitude;
@@ -576,14 +706,18 @@ public static class BalanceBattle
     private static void Hit(BalanceFieldHero hero, BattleEnemy enemy, ref int remaining, BalanceNightResult result)
     {
         int defense = Mathf.RoundToInt(enemy.Group.Defense);
-        if (!hero.HitByDefense.TryGetValue(defense, out float hit))
+        var key = (defense, hero.SkillAttackScale);
+        if (!hero.HitByDefense.TryGetValue(key, out float hit))
         {
-            hit = HeroSimCalc.CalculateAverageHit(hero.Entry.BasePattern, hero.Heavies, hero.Attack, defense) * hero.DamageScale;
-            hero.HitByDefense[defense] = hit;
+            hit = HeroSimCalc.CalculateAverageHit(hero.Entry.BasePattern, hero.Heavies, hero.Attack * hero.SkillAttackScale, defense) * hero.DamageScale;
+            hero.HitByDefense[key] = hit;
         }
         enemy.Hp -= enemy.Has(EnemyAttribute.HitsShield) ? hero.HitsPerAttack : hit;
-        if (enemy.Hp > 0f) return;
+        if (enemy.Hp <= 0f) KillEnemy(enemy, ref remaining, result);
+    }
 
+    private static void KillEnemy(BattleEnemy enemy, ref int remaining, BalanceNightResult result)
+    {
         enemy.Done = true;
         remaining--;
         result.Killed++;
@@ -615,7 +749,7 @@ public static class BalanceBattle
         if (target == null) enemy.Cooldown = Mathf.Max(enemy.Cooldown, 0f);
         if (enemy.Blocker != null) return;
 
-        float speed = enemy.Group.TilesPerSecond * (target != null ? enemy.Group.MovingShare : 1f);
+        float speed = enemy.Group.TilesPerSecond * enemy.SpeedScale * (target != null ? enemy.Group.MovingShare : 1f);
         Move(enemy, speed * StepSeconds, meleeByTile, ref remaining, result);
     }
 

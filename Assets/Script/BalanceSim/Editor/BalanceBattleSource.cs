@@ -42,6 +42,9 @@ public class BalanceBattleAssets
     public int HeroHpPercent = 100;
     // 근접을 어디에 세울지. 자동이면 밤마다 나머지 방식을 다 돌려 보고 피해가 가장 적은 쪽을 쓴다(실제 플레이어의 재배치).
     public BalancePlacement Placement = BalancePlacement.Auto;
+    // 플레이어 스킬(공격 버프·둔화·힐 장판)을 밤에 쓸지. 기준(실플레이 재현)은 스킬 없이 맞춰서 기본은 끈다.
+    public bool UsePlayerSkills;
+    public BalancePlayerSkillSet PlayerSkills = new();
     public int BaseHp;                                              // GameManager 프리팹의 hp(타이틀 강화 전)
     public readonly List<BaseUpgradeData> BaseHpUpgrades = new();   // GameManager.hpUpgrades - 타이틀 강화로 늘어나는 본진 체력
 
@@ -81,14 +84,17 @@ public static class BalanceBattleSource
     {
         MapRegistry registry = null;
         GameLifeTimeScope scope = null;
+        PlayerSkillPanel skillPanel = null;
         foreach (GameObject root in scene.GetRootGameObjects())
         {
             if (registry == null) registry = root.GetComponentInChildren<MapRegistry>(true);
             if (scope == null) scope = root.GetComponentInChildren<GameLifeTimeScope>(true);
+            if (skillPanel == null) skillPanel = root.GetComponentInChildren<PlayerSkillPanel>(true);
         }
 
         if (scope != null) ReadBaseHp(scope, assets);
         if (registry != null) ReadModules(registry, assets);
+        assets.PlayerSkills = BalancePlayerSkillSource.Read(scope, skillPanel);
     }
 
     // GameManager는 씬에 미리 있지 않고 GameLifeTimeScope가 시작할 때 프리팹으로 만든다 - 그 프리팹 값을 읽는다.

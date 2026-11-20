@@ -126,7 +126,7 @@ public class ReplayEconomyStrategy : IEconomySimStrategy
     }
 
     // 비용(음수)에서 모자란 자원을 채우는 데 필요한 교환 목록(자원마다 모자란 양 ÷ 교환량 올림).
-    private static List<ProductionType> TradesFor(EconomySimWorld world, (ProductionType Type, int Amount)[] cost)
+    internal static List<ProductionType> TradesFor(EconomySimWorld world, (ProductionType Type, int Amount)[] cost)
     {
         var trades = new List<ProductionType>();
         foreach (var (type, amount) in cost)

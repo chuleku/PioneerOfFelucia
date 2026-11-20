@@ -26,6 +26,8 @@ public class BalanceHeroWorld
     private readonly Dictionary<(OccupantKind Kind, int Tier), List<HeroData>> poolByTierAndKind = new();
     private readonly Dictionary<(HeroData Data, int ClassLevel), HeroSimResult> powerCache;
     private readonly Dictionary<(OccupantKind Kind, int Tier), int> combineCounts = new();
+    // 오늘 밤 웨이브 요약. 전투를 끄면 null(웨이브를 모르는 상태).
+    public BalanceWaveOutlook Tonight;
     private int meleeDraws;
     private int rangedDraws;
 

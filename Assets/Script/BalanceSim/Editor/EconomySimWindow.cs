@@ -24,6 +24,7 @@ public class EconomySimWindow : EditorWindow
     private const string HeroDamageLabel = "영웅 피해 보정(%)";
     private const string HeroHpLabel = "영웅 체력 보정(%)";
     private const string PlacementLabel = "배치 방식";
+    private const string PlayerSkillLabel = "플레이어 스킬 사용(공격 버프·둔화·힐)";
     private const string BattleDetailHeader = "전투 상세 (누수가 있었거나 보스가 나온 밤)";
     private const int MinimumTuningPercent = 10;
     private const int MaximumTuningPercent = 500;
@@ -138,6 +139,7 @@ public class EconomySimWindow : EditorWindow
     private int heroDamagePercent = 100;
     private int heroHpPercent = 100;
     private int placementMode = (int)BalancePlacement.Auto;
+    private bool usePlayerSkills;
     private Vector2 detailScroll;
     private string[] strategyNames = Array.Empty<string>();
     private string poolNote = string.Empty;
@@ -220,6 +222,9 @@ public class EconomySimWindow : EditorWindow
             heroDamagePercent = EditorGUILayout.IntSlider(HeroDamageLabel, heroDamagePercent, MinimumTuningPercent, MaximumTuningPercent);
             heroHpPercent = EditorGUILayout.IntSlider(HeroHpLabel, heroHpPercent, MinimumTuningPercent, MaximumTuningPercent);
             placementMode = EditorGUILayout.Popup(PlacementLabel, placementMode, PlacementModes);
+            usePlayerSkills = EditorGUILayout.Toggle(PlayerSkillLabel, usePlayerSkills);
+            string skillProblem = battleAssets?.PlayerSkills?.Problem;
+            if (usePlayerSkills && skillProblem != null) EditorGUILayout.HelpBox(skillProblem, MessageType.Warning);
         }
         // 가정 모드 입력은 전투를 끌 때만 쓴다.
         using (new EditorGUI.DisabledScope(feliumInput.UseBattle))
@@ -318,6 +323,7 @@ public class EconomySimWindow : EditorWindow
         battleAssets.HeroDamagePercent = heroDamagePercent;
         battleAssets.HeroHpPercent = heroHpPercent;
         battleAssets.Placement = (BalancePlacement)placementMode;
+        battleAssets.UsePlayerSkills = usePlayerSkills;
     }
 
     private string RunSeed(int run) => $"{seed}-{run}";

@@ -18,7 +18,7 @@ public enum HeroSpendPolicy
 }
 
 // 규칙형 봇. 경제: 가중치가 높은 자원 시설을 더 많이 짓고, 빈 일자리 -> 시민 모집 -> 집 순서로 인력을 채운다.
-// 영웅: 합성 -> 생성(적은 쪽 종류 먼저) -> 직업 강화 순서. 티어 강화는 인게임에서 쓸 수 없어 넣지 않는다.
+// 영웅: 합성 -> 생성(근접은 지역당 막을 만큼, 나머지는 원거리) -> 직업 강화 순서. 티어 강화는 인게임에서 쓸 수 없어 넣지 않는다.
 public class RuleEconomyStrategy : IEconomySimStrategy
 {
     private const int MaxActionsPerDay = 500; // 규칙이 맞물려 끝나지 않는 경우를 막는 안전장치
@@ -26,23 +26,29 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     private const string RangedLabel = "원거리";
     // 영웅 다음 1명 비용의 몇 배 이상 쌓인 자원을 "남는 자원"으로 볼지(재배치 전략).
     private const int SurplusHeroMultiple = 10;
+    // 열린 지역 하나에 둘 근접 수. 이만큼 채우면 그다음부터는 원거리를 먼저 뽑는다.
+    private const int MeleePerRegion = 4;
 
     private readonly Dictionary<ProductionType, int> buildWeights;
     private readonly bool upgradeBeforeBuild;
     private readonly HeroSpendPolicy heroPolicy;
     private readonly bool rebalance;
+    // 실제 플레이 방식(1~12일차 기록): 같은 수면 원거리를 먼저 뽑고, 강화는 남은 양이 적은 자원 시설부터(목재·석재를 고르게),
+    // 펠리움은 지을 것·뽑을 것 하나를 끝까지 채울 만큼만 바꾼다.
+    private readonly bool playerStyle;
 
     public string Name { get; }
     public bool UsesHeroes => heroPolicy != HeroSpendPolicy.None;
 
     public RuleEconomyStrategy(string name, Dictionary<ProductionType, int> buildWeights, bool upgradeBeforeBuild,
-        HeroSpendPolicy heroPolicy, bool rebalance = false)
+        HeroSpendPolicy heroPolicy, bool rebalance = false, bool playerStyle = false)
     {
         Name = name;
         this.buildWeights = buildWeights;
         this.upgradeBeforeBuild = upgradeBeforeBuild;
         this.heroPolicy = heroPolicy;
         this.rebalance = rebalance;
+        this.playerStyle = playerStyle;
     }
 
     // 미리 정해둔 비교용 봇들.
@@ -50,9 +56,9 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     {
         return new List<IEconomySimStrategy>
         {
-            // 기준점: 실제 플레이 기록. 기록이 끝난 뒤(11일차~)는 균형 봇이 이어 받는다.
-            ReplayEconomyStrategy.CreateUserPlay(new RuleEconomyStrategy("균형", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.Alternate)),
-            new RuleEconomyStrategy("균형", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.Alternate),
+            // 기준점: 실제 플레이 기록. 기록이 끝난 뒤(13일차~)는 균형 봇이 이어 받는다.
+            ReplayEconomyStrategy.CreateUserPlay(CreateBalanced()),
+            CreateBalanced(),
             new RuleEconomyStrategy("건설자원 우선", Weights(2, 1, 1, 1, 2), false, HeroSpendPolicy.Alternate),
             new RuleEconomyStrategy("강화 우선", Weights(1, 1, 1, 1, 1), true, HeroSpendPolicy.Alternate),
             new RuleEconomyStrategy("경제 먼저", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.AfterEconomy),
@@ -61,6 +67,10 @@ public class RuleEconomyStrategy : IEconomySimStrategy
             new RuleEconomyStrategy("경제만(영웅 없음)", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.None),
         };
     }
+
+    // 균형 = 실제 플레이 방식. 가중치는 1~2지역을 다 채웠을 때의 실제 구성(목재·석재·금 2, 철 3, 식량 1 - 2지역은 식량 빼고 철 2개).
+    private static RuleEconomyStrategy CreateBalanced() =>
+        new("균형", Weights(2, 1, 2, 3, 2), false, HeroSpendPolicy.Alternate, playerStyle: true);
 
     private static Dictionary<ProductionType, int> Weights(int wood, int food, int gold, int iron, int stone)
     {
@@ -96,6 +106,7 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     private bool TrySpendFelium(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
     {
         if (world.Resources.Special <= 0) return false;
+        if (playerStyle) return TrySpendFeliumLikePlayer(world, heroes, log);
 
         ProductionType? target = null;
         if (UsesHeroes && HasEveryFacility(world))
@@ -108,6 +119,35 @@ public class RuleEconomyStrategy : IEconomySimStrategy
         if (!world.TryTrade(target.Value)) return false;
         log.Actions.Add($"펠리움→{target.Value}");
         log.FeliumUsed++;
+        return true;
+    }
+
+    // 빈 슬롯이 있으면 다음 시설 건설비, 없으면 다음 영웅 생성비를 펠리움으로 한 번에 다 채운다(보스 펠리움으로 새 지역 슬롯을 채우던 운영).
+    // 다 채울 만큼 없으면 아껴 둔다 - 목재만 받고 석재가 모자라 못 짓는 일이 없게.
+    private bool TrySpendFeliumLikePlayer(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
+    {
+        List<ProductionType> trades = null;
+        // 건설비가 이미 있으면(일꾼이 없어 아직 안 지은 것) 영웅 쪽으로 넘어간다. 모자란데 펠리움이 부족하면 건설용으로 아껴 둔다.
+        if (world.FreeSlots > 0 && NextBuildType(world) is ProductionType buildType)
+        {
+            trades = ReplayEconomyStrategy.TradesFor(world, world.BuildCost(buildType));
+            if (trades.Count > world.Resources.Special) return false;
+        }
+        if (trades == null || trades.Count == 0)
+        {
+            if (!UsesHeroes || !HasEveryFacility(world)) return false;
+            OccupantKind kind = FirstHeroKind(world, heroes);
+            if (heroes.GetBlockReason(kind) == BalanceBlockReason.Population) return false;
+            trades = ReplayEconomyStrategy.TradesFor(world, heroes.GetNextCost(kind));
+        }
+
+        if (trades.Count == 0 || trades.Count > world.Resources.Special) return false;
+        foreach (ProductionType type in trades)
+        {
+            world.TryTrade(type);
+            log.Actions.Add($"펠리움→{type}");
+            log.FeliumUsed++;
+        }
         return true;
     }
 
@@ -201,11 +241,9 @@ public class RuleEconomyStrategy : IEconomySimStrategy
 
     // 적은 쪽 종류를 먼저 시도하고, 막히면 다른 종류를 시도한다. 인구가 없으면 한 명 모집해서 바로 쓴다 -
     // 따로 두면 다음 경제 행동이 그 시민을 일터로 데려가 버린다.
-    private static bool TryCreateHero(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
+    private bool TryCreateHero(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
     {
-        OccupantKind first = heroes.CountByKind(OccupantKind.MeleeHero) <= heroes.CountByKind(OccupantKind.RangedHero)
-            ? OccupantKind.MeleeHero
-            : OccupantKind.RangedHero;
+        OccupantKind first = FirstHeroKind(world, heroes);
         OccupantKind second = first == OccupantKind.MeleeHero ? OccupantKind.RangedHero : OccupantKind.MeleeHero;
 
         if (!world.Citizens.CheckCanUseCitizen())
@@ -226,10 +264,38 @@ public class RuleEconomyStrategy : IEconomySimStrategy
         return false;
     }
 
+    // 근접은 탱커(저지)라 지상 적이 나오는 지역마다 막을 만큼만 뽑고, 화력은 원거리로 올린다(실제 플레이: 지역당 근접 4~5명).
+    // 오늘 밤 웨이브(스테이지 정보)를 보고 정한다: 공중만 나오는 지역 몫의 근접은 뽑지 않고(그만큼 원거리),
+    // 은신·잠행이 나오면 막아야만 맞으니 근접을 원거리 수만큼까지 더 뽑는다. 전투를 끄면 열린 지역 수로 센다.
+    private static OccupantKind FirstHeroKind(EconomySimWorld world, BalanceHeroWorld heroes)
+    {
+        BalanceWaveOutlook tonight = heroes.Tonight;
+        int groundRegions = tonight != null ? tonight.GroundRegions : world.UnlockedRegionCount;
+        int meleeTarget = MeleePerRegion * System.Math.Max(1, groundRegions);
+        if (tonight != null && tonight.Hidden) meleeTarget = System.Math.Max(meleeTarget, heroes.CountByKind(OccupantKind.RangedHero));
+        return heroes.CountByKind(OccupantKind.MeleeHero) < meleeTarget ? OccupantKind.MeleeHero : OccupantKind.RangedHero;
+    }
+
     // ── 경제 ──
 
     private bool TryEconomyAction(EconomySimWorld world, EconomySimDayLog log)
     {
+        // 실제 플레이 방식: 빈 슬롯부터 채운다(새 지역이 열리면 그날 시설·집을 다 짓고, 일꾼은 그다음에 모집해 채운다).
+        // 기본 규칙은 일자리를 다 채운 뒤에만 지어서, 인구에 막히면 새 지역 슬롯이 계속 비어 있다.
+        // 집은 지역마다 하나(1지역 시설 5+집, 2지역 목재·석재·철·금·철+집) - 인구가 모자랄 때마다 집을 지으면 슬롯이 집으로 차서 수입이 무너진다.
+        if (playerStyle && world.FreeSlots > 0)
+        {
+            if (HasEveryFacility(world) && HouseUnderCap(world))
+            {
+                if (world.TryBuildHouse())
+                {
+                    log.Actions.Add("집 건설");
+                    return true;
+                }
+            }
+            else if (TryBuildFacility(world, log)) return true;
+        }
+
         if (world.OpenWorkerSlots > 0 && TryFillWorkers(world, log)) return true;
 
         if (world.OpenWorkerSlots == 0)
@@ -245,7 +311,7 @@ public class RuleEconomyStrategy : IEconomySimStrategy
 
     // 놀고 있는 시민 배치 -> 모자라면 모집 -> 최대 시민이 꽉 찼으면 집 건설/강화.
     // 영웅이 인구를 티어만큼 써서 놀고 있는 시민 수가 음수일 수 있다.
-    private static bool TryFillWorkers(EconomySimWorld world, EconomySimDayLog log)
+    private bool TryFillWorkers(EconomySimWorld world, EconomySimDayLog log)
     {
         int idle = world.Citizens.CanUseCitizen;
         if (idle > 0)
@@ -292,10 +358,13 @@ public class RuleEconomyStrategy : IEconomySimStrategy
         return world.Citizens.CanUseCitizen + recruitable < world.NewFacilityWorkers;
     }
 
+    // 실제 플레이 방식은 집을 지역마다 하나만 짓는다(나머지 인구는 집 강화로).
+    private bool HouseUnderCap(EconomySimWorld world) => !playerStyle || world.Houses.Count < world.UnlockedRegionCount;
+
     // 집 건설, 슬롯이 없으면 기존 집 강화로 최대 시민을 늘린다.
-    private static bool TryRaiseCitizenCap(EconomySimWorld world, EconomySimDayLog log)
+    private bool TryRaiseCitizenCap(EconomySimWorld world, EconomySimDayLog log)
     {
-        if (world.TryBuildHouse())
+        if (HouseUnderCap(world) && world.TryBuildHouse())
         {
             log.Actions.Add("집 건설");
             return true;
@@ -328,6 +397,14 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     {
         if (world.FreeSlots <= 0) return false;
 
+        ProductionType? pick = NextBuildType(world);
+        if (pick == null || !world.TryBuildFacility(pick.Value)) return false;
+        log.Actions.Add($"{pick.Value} 건설");
+        return true;
+    }
+
+    private ProductionType? NextBuildType(EconomySimWorld world)
+    {
         ProductionType? pick = null;
         float bestRatio = float.MaxValue;
         foreach (ProductionType type in world.BuildableTypes)
@@ -338,20 +415,19 @@ public class RuleEconomyStrategy : IEconomySimStrategy
             bestRatio = ratio;
             pick = type;
         }
-
-        if (pick == null || !world.TryBuildFacility(pick.Value)) return false;
-        log.Actions.Add($"{pick.Value} 건설");
-        return true;
+        return pick;
     }
 
-    // 강화 단계가 가장 낮은 시설부터 강화한다.
-    private static bool TryUpgradeFacility(EconomySimWorld world, EconomySimDayLog log)
+    // 강화 단계가 가장 낮은 시설부터 강화한다. 실제 플레이 방식은 같은 단계면 남은 양이 적은 자원 쪽부터(목재·석재를 고르게).
+    private bool TryUpgradeFacility(EconomySimWorld world, EconomySimDayLog log)
     {
         ProductionFacility pick = null;
         foreach (ProductionFacility facility in world.Facilities)
         {
             if (facility.UpgradeCount >= facility.MaxUpgrade || !facility.CheckCanUpgrade()) continue;
             if (pick == null || facility.UpgradeCount < pick.UpgradeCount) pick = facility;
+            else if (playerStyle && facility.UpgradeCount == pick.UpgradeCount
+                && world.Resources.GetAmount(facility.ProductionType) < world.Resources.GetAmount(pick.ProductionType)) pick = facility;
         }
 
         if (pick == null || !EconomySimWorld.TryUpgrade(pick)) return false;

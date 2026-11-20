@@ -9,6 +9,7 @@ public static class BalanceEnemyMotion
 {
     private const string ResourcesPrefix = "Resources/";
     private const string AttackStateName = "Attack";
+    private const string ImmuneDebuffsField = "immuneDebuffs";
 
     private static readonly Dictionary<string, float> cache = new();
 
@@ -67,6 +68,14 @@ public static class BalanceEnemyMotion
         var serialized = new UnityEditor.SerializedObject(enemy);
         UnityEditor.SerializedProperty property = serialized.FindProperty("attackClipLength");
         return property != null ? property.floatValue : 0f;
+    }
+
+    // 프리팹의 immuneDebuffs(EnemyBase.ImmuneDebuffs의 바탕). 스턴·점화 자동 면역은 시뮬에 없는 효과라 뺀다.
+    public static DebuffType ImmuneDebuffs(string prefabPath)
+    {
+        if (string.IsNullOrEmpty(prefabPath) || LoadEnemy(prefabPath) is not EnemyBase enemy) return DebuffType.None;
+        UnityEditor.SerializedProperty property = new UnityEditor.SerializedObject(enemy).FindProperty(ImmuneDebuffsField);
+        return property != null ? (DebuffType)property.intValue : DebuffType.None;
     }
 
     // 웨이브 표의 Prefab 칸은 "Resources/EnemyUnitPrefabs/Chicken"처럼 Resources 기준 경로다.
