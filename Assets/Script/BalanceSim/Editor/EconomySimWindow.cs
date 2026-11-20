@@ -92,7 +92,7 @@ public class EconomySimWindow : EditorWindow
     // BalancePlacement 순서와 같다.
     private static readonly string[] PlacementModes =
     {
-        "자동(밤마다 셋 다 해 보고 피해 적은 쪽)", "입구 집중(근접을 포탈 앞에)", "경로 분산(근접을 경로 따라 나눠)", "본진 쪽(레인 2/3 지점)",
+        "자동(지역마다 셋 다 해 보고 피해 적은 쪽)", "입구 집중(근접을 포탈 앞에)", "경로 분산(근접을 경로 따라 나눠)", "본진 쪽(레인 2/3 지점)",
     };
 
     // 전략 하나를 시드 여러 개로 돌린 마지막 날 요약.

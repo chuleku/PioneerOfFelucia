@@ -100,14 +100,53 @@ public static class BalanceBattle
     {
         if (assets.Placement != BalancePlacement.Auto) return RunNight(assets, heroes, day, seed, assets.Placement);
 
-        // 같은 시드라 적 구성·포탈은 그대로고 배치만 다르다 - 가장 나은 밤을 고른다.
-        BalanceNightResult best = null;
+        // 같은 시드라 적 구성·포탈은 그대로고 배치만 다르다. 어느 영웅이 어느 지역에 가는지(PickRegion)는
+        // 배치 방식과 상관없어서, 지역마다 따로 가장 나은 방식을 고른다(실제로도 1지역은 나눠 세우고 2지역은 본진 앞에 모은다).
+        var result = new BalanceNightResult { Placement = BalancePlacement.Auto };
+        List<BalanceNightPlan> plans = BalanceWavePlan.Build(assets, day);
+        var activeLanes = new List<List<int>>();
+        foreach (BalanceNightPlan plan in plans) activeLanes.Add(PickActiveLanes(plan, seed, day));
+
+        var placedByMode = new Dictionary<BalancePlacement, List<List<BalanceFieldHero>>>();
         foreach (BalancePlacement placement in ManualPlacements)
         {
-            BalanceNightResult night = RunNight(assets, heroes, day, seed, placement);
-            if (best == null || IsBetter(night, best)) best = night;
+            var placeResult = new BalanceNightResult();
+            placedByMode[placement] = Place(heroes, plans, activeLanes, placeResult, assets, placement);
+            result.Placed = placeResult.Placed;
+            result.Inventory = placeResult.Inventory;
         }
-        return best;
+
+        for (int index = 0; index < plans.Count; index++)
+        {
+            BalanceNightResult best = null;
+            BalancePlacement bestPlacement = BalancePlacement.Auto;
+            foreach (BalancePlacement placement in ManualPlacements)
+            {
+                var region = new BalanceNightResult();
+                RunRegion(plans[index], activeLanes[index], placedByMode[placement][index], seed, day, region);
+                if (best != null && !IsBetter(region, best)) continue;
+                best = region;
+                bestPlacement = placement;
+            }
+            AddRegion(result, best, bestPlacement);
+        }
+        return result;
+    }
+
+    // 지역 하나의 결과를 밤 전체 합에 더한다. 요약 앞에 그 지역에서 고른 배치 방식을 붙인다.
+    private static void AddRegion(BalanceNightResult night, BalanceNightResult region, BalancePlacement placement)
+    {
+        night.Spawned += region.Spawned;
+        night.Killed += region.Killed;
+        night.Leaked += region.Leaked;
+        night.BaseDamage += region.BaseDamage;
+        night.BossLeaked |= region.BossLeaked;
+        night.BossSpawned |= region.BossSpawned;
+        night.BossKilled |= region.BossKilled;
+        night.HeroDeaths += region.HeroDeaths;
+        night.TimedOut |= region.TimedOut;
+        night.BossNote ??= region.BossNote;
+        foreach (string note in region.RegionNotes) night.RegionNotes.Add($"[{PlacementName(placement)}] {note}");
     }
 
     private static readonly BalancePlacement[] ManualPlacements =

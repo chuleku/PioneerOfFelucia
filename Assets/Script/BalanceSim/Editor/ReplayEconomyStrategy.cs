@@ -23,6 +23,7 @@ public class ReplayEconomyStrategy : IEconomySimStrategy
         public string Label;
         public ReplayAction Run;
         public bool UsesFelium;
+        public bool Optional;   // "못 막을 것 같으면" 같은 선택 행동 - 못 해도 ✗로 세지 않는다
     }
 
     private readonly Dictionary<int, List<ReplayStep>> script;
@@ -60,7 +61,7 @@ public class ReplayEconomyStrategy : IEconomySimStrategy
         {
             string result = step.Run(world, heroes, log, out string reason);
             if (result != null) done.Add(result);
-            else misses.Add($"{MissMark}{step.Label}({reason})");
+            else if (!step.Optional) misses.Add($"{MissMark}{step.Label}({reason})");
         }
 
         // 실제 플레이는 기록대로 하고도 펠리움이 남았다(10일차 끝 5개) - 남은 펠리움은 영웅 소환에 더 쓴다.
@@ -110,12 +111,7 @@ public class ReplayEconomyStrategy : IEconomySimStrategy
     private static bool TryFeliumHero(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log,
         List<string> extra, OccupantKind kind, int spare)
     {
-        var trades = new List<ProductionType>();
-        foreach (var (type, amount) in heroes.GetNextCost(kind))
-        {
-            int deficit = -amount - world.Resources.GetAmount(type);
-            for (int count = 0; count * world.Resources.TradeAmount < deficit; count++) trades.Add(type);
-        }
+        List<ProductionType> trades = TradesFor(world, heroes.GetNextCost(kind));
         if (trades.Count == 0 || trades.Count > spare) return false;
 
         foreach (ProductionType type in trades)
@@ -127,6 +123,34 @@ public class ReplayEconomyStrategy : IEconomySimStrategy
         if (!heroes.TryCreate(kind, out BalanceHero created)) return false;
         extra.Add($"{ExtraMark}{KindLabel(kind)} 생성 → {created.Data.HeroName}(T{created.Data.Tier})");
         return true;
+    }
+
+    // 비용(음수)에서 모자란 자원을 채우는 데 필요한 교환 목록(자원마다 모자란 양 ÷ 교환량 올림).
+    private static List<ProductionType> TradesFor(EconomySimWorld world, (ProductionType Type, int Amount)[] cost)
+    {
+        var trades = new List<ProductionType>();
+        foreach (var (type, amount) in cost)
+        {
+            int deficit = -amount - world.Resources.GetAmount(type);
+            for (int count = 0; count * world.Resources.TradeAmount < deficit; count++) trades.Add(type);
+        }
+        return trades;
+    }
+
+    // 모자란 자원을 펠리움으로 전부 채운다. 펠리움이 모자라면 하나도 바꾸지 않고 null.
+    // 채운 게 있으면 " (펠리움→Wood·Stone)", 없으면 빈 문자열을 돌려준다.
+    private static string Fund(EconomySimWorld world, (ProductionType Type, int Amount)[] cost, EconomySimDayLog log)
+    {
+        List<ProductionType> trades = TradesFor(world, cost);
+        if (trades.Count > world.Resources.Special) return null;
+        if (trades.Count == 0) return string.Empty;
+
+        foreach (ProductionType type in trades)
+        {
+            world.TryTrade(type);
+            log.FeliumUsed++;
+        }
+        return $" (펠리움→{string.Join("·", trades)})";
     }
 
     // 같은 문구가 이어지면 "문구 ×n"으로 줄인다(시민 배치 20번 등).
@@ -148,7 +172,7 @@ public class ReplayEconomyStrategy : IEconomySimStrategy
 
     // ── 기록 ──
 
-    // 1~10일차 실제 플레이(10일차 보스 처치까지 확인한 운영).
+    // 1~12일차 실제 플레이(10일차 보스 처치까지 확인, 11~12일차는 2지역을 여는 운영).
     public static ReplayEconomyStrategy CreateUserPlay(IEconomySimStrategy fallback)
     {
         const ProductionType Wood = ProductionType.Wood;
@@ -179,8 +203,15 @@ public class ReplayEconomyStrategy : IEconomySimStrategy
                 Create(Melee, 1)),
             [9] = Day(Create(Ranged, 4), Merge(Ranged, FirstTier, 1), Merge(Ranged, SecondTier, 1), Trade(Gold), ClassUp(Ranged, 1)),
             [10] = Day(Create(Melee, 4), Merge(Melee, FirstTier, 3), ClassUp(Ranged, 2)),
+            // 2지역이 열리는 날: 원거리 5명(+합성 1회)으로 막고, 보스 펠리움으로 2지역 슬롯에 자원 시설(식량 빼고 철 2개)과 집을 지은 뒤 강화 위주.
+            // 시민 모집·일꾼 채우기·강화 대상은 기록에 따로 없어 할 수 있는 만큼 한다(12일차 화면 시민 80/80).
+            // 합성 단계는 기록에 없어 T1으로 본다(새로 뽑은 원거리가 대부분 T1).
+            [11] = Day(Create(Ranged, 5), Merge(Ranged, FirstTier, 1), BuildFunded(Wood), BuildFunded(Stone), BuildFunded(Iron),
+                BuildFunded(Gold), BuildFunded(Iron), BuildHouseFunded(), RecruitAll(), FillWorkers(), UpgradeAll(Food)),
+            // "못 막을 것 같으면 원거리 한두 명 더"는 자원이 되면 하는 선택 행동으로 둔다.
+            [12] = Day(RecruitAll(), Create(Melee, 4), Create(Ranged, 1), Optional(Create(Ranged, 2))),
         };
-        return new ReplayEconomyStrategy("실플레이 재현(1~10일)", script, fallback);
+        return new ReplayEconomyStrategy("실플레이 재현(1~12일)", script, fallback);
     }
 
     private static List<ReplayStep> Day(params IEnumerable<ReplayStep>[] groups)
@@ -195,6 +226,15 @@ public class ReplayEconomyStrategy : IEconomySimStrategy
         for (int index = 0; index < count; index++)
         {
             yield return new ReplayStep { Label = label, Run = run };
+        }
+    }
+
+    private static IEnumerable<ReplayStep> Optional(IEnumerable<ReplayStep> steps)
+    {
+        foreach (ReplayStep step in steps)
+        {
+            step.Optional = true;
+            yield return step;
         }
     }
 
@@ -214,6 +254,44 @@ public class ReplayEconomyStrategy : IEconomySimStrategy
         {
             reason = world.FreeSlots <= 0 ? "빈 슬롯 없음" : "자원 부족";
             return world.TryBuildHouse() ? "집 건설" : null;
+        });
+
+    // 모자란 건설 자원을 펠리움으로 채워 짓는다(보스 처치 보상으로 새 지역 슬롯을 채울 때).
+    private static IEnumerable<ReplayStep> BuildFunded(ProductionType type) =>
+        Repeat(1, $"{type} 건설", (EconomySimWorld world, BalanceHeroWorld _, EconomySimDayLog log, out string reason) =>
+        {
+            reason = world.FreeSlots <= 0 ? "빈 슬롯 없음" : "펠리움 부족";
+            if (world.FreeSlots <= 0) return null;
+            string funded = Fund(world, world.BuildCost(type), log);
+            return funded != null && world.TryBuildFacility(type) ? $"{type} 건설{funded}" : null;
+        });
+
+    private static IEnumerable<ReplayStep> BuildHouseFunded() =>
+        Repeat(1, "집 건설", (EconomySimWorld world, BalanceHeroWorld _, EconomySimDayLog log, out string reason) =>
+        {
+            reason = world.FreeSlots <= 0 ? "빈 슬롯 없음" : "펠리움 부족";
+            if (world.FreeSlots <= 0) return null;
+            string funded = Fund(world, world.HouseCost(), log);
+            return funded != null && world.TryBuildHouse() ? $"집 건설{funded}" : null;
+        });
+
+    // 강화 단계가 가장 낮은 시설부터 자원이 되는 만큼 강화한다(excluded 종류는 빼고). 기록에 대상이 없을 때 쓴다.
+    private static IEnumerable<ReplayStep> UpgradeAll(ProductionType excluded) =>
+        Repeat(1, "시설 강화", (EconomySimWorld world, BalanceHeroWorld _, EconomySimDayLog _, out string reason) =>
+        {
+            reason = "자원 부족";
+            int count = 0;
+            for (; count < MaxExtraActions; count++)
+            {
+                ProductionFacility pick = null;
+                foreach (ProductionFacility facility in world.Facilities)
+                {
+                    if (facility.ProductionType == excluded || !facility.CheckCanUpgrade()) continue;
+                    if (pick == null || facility.UpgradeCount < pick.UpgradeCount) pick = facility;
+                }
+                if (pick == null || !EconomySimWorld.TryUpgrade(pick)) break;
+            }
+            return count > 0 ? $"시설 강화 ×{count}" : null;
         });
 
     // 그 종류 시설 중 강화 단계가 가장 낮은 것.
@@ -247,6 +325,29 @@ public class ReplayEconomyStrategy : IEconomySimStrategy
         {
             reason = world.Citizens.CurrentCitizen >= world.Citizens.MaxCitizen ? "최대 시민" : "식량 부족";
             return world.Recruit(1) == 1 ? "시민 모집" : null;
+        });
+
+    // 인구 한도와 식량이 허락하는 만큼 한 번에 모집한다.
+    private static IEnumerable<ReplayStep> RecruitAll() =>
+        Repeat(1, "시민 모집", (EconomySimWorld world, BalanceHeroWorld _, EconomySimDayLog _, out string reason) =>
+        {
+            reason = world.Citizens.CurrentCitizen >= world.Citizens.MaxCitizen ? "최대 시민" : "식량 부족";
+            int recruited = world.Recruit(int.MaxValue);
+            return recruited > 0 ? $"시민 모집 ×{recruited}" : null;
+        });
+
+    // 놀고 있는 시민으로 빈 일자리를 채운다(새로 지은 시설 일꾼).
+    private static IEnumerable<ReplayStep> FillWorkers() =>
+        Repeat(1, "일꾼 채우기", (EconomySimWorld world, BalanceHeroWorld _, EconomySimDayLog _, out string reason) =>
+        {
+            reason = world.Citizens.CanUseCitizen <= 0 ? "놀고 있는 시민 없음" : "빈 일자리 없음";
+            int assigned = 0;
+            foreach (ProductionFacility facility in world.Facilities)
+            {
+                int open = facility.MaxWorker - facility.WorkerAmount;
+                if (open > 0) assigned += EconomySimWorld.AssignWorkers(facility, open);
+            }
+            return assigned > 0 ? $"일꾼 배치 ×{assigned}" : null;
         });
 
     private static IEnumerable<ReplayStep> Assign(ProductionType type, int count) =>

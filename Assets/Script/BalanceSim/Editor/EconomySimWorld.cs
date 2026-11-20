@@ -20,6 +20,8 @@ public class EconomySimWorld : IDisposable
     private readonly List<RegionFacilitySlots> regions = new();
     private readonly Dictionary<ProductionType, BuildableFacility> facilityOptions = new();
     private readonly BuildableFacility houseOption;
+    private readonly ProductionEconomyConfig economyConfig;
+    private readonly UpgradeState upgradeState;
 
     public ResourcesManager Resources { get; }
     public CitizenManager Citizens { get; }
@@ -32,6 +34,8 @@ public class EconomySimWorld : IDisposable
     public EconomySimWorld(EconomySimAssets assets, UpgradeState upgradeState)
     {
         CitizenFoodCost = assets.CitizenFoodCost;
+        economyConfig = assets.EconomyConfig;
+        this.upgradeState = upgradeState;
         hiddenObject = EditorUtility.CreateGameObjectWithHideFlags(HiddenObjectName, HideFlags.HideAndDontSave);
         Resources = CloneComponent(assets.ResourcesPrefab, upgradeState);
         Citizens = CloneComponent(assets.CitizenPrefab, upgradeState);
@@ -108,6 +112,14 @@ public class EconomySimWorld : IDisposable
     {
         for (int count = 0; count < amount; count++) Resources.GetSpecial();
     }
+
+    // 건설 비용(음수, 할인 반영) - BaseConstructor.CanBuild가 보는 값과 같다.
+    public (ProductionType Type, int Amount)[] BuildCost(ProductionType type) =>
+        facilityOptions.TryGetValue(type, out BuildableFacility option)
+            ? ProductionFacility.PreviewConstructCost(option.facilityValue, economyConfig, upgradeState)
+            : Array.Empty<(ProductionType, int)>();
+
+    public (ProductionType Type, int Amount)[] HouseCost() => House.PreviewConstructCost(houseOption.houseConfig, economyConfig, upgradeState);
 
     public bool TryBuildHouse()
     {

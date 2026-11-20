@@ -163,7 +163,9 @@ public static class EconomySimRunner
         log.Placed = night.Placed;
         log.Inventory = night.Inventory;
         log.HeroDeaths = night.HeroDeaths;
-        log.BattleNote = $"[{BalanceBattle.PlacementName(night.Placement)}] " + string.Join(" · ", night.RegionNotes) + (night.TimedOut ? " · 시간 초과" : string.Empty)
+        // 자동이면 지역마다 고른 방식이 요약 앞에 붙어 있다.
+        string placement = night.Placement == BalancePlacement.Auto ? string.Empty : $"[{BalanceBattle.PlacementName(night.Placement)}] ";
+        log.BattleNote = placement + string.Join(" · ", night.RegionNotes) + (night.TimedOut ? " · 시간 초과" : string.Empty)
             + (night.BossNote != null ? $" · {night.BossNote}" : string.Empty);
         return (log.PerfectNight ? PerfectNightFelium : 0) + (night.BossKilled ? BossFelium : 0);
     }
