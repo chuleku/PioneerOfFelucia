@@ -121,7 +121,10 @@ public class BalanceHeroWorld
     public bool CanAfford(OccupantKind kind) => economy.Resources.CheckResources(GetNextCost(kind));
 
     // HeroSetPanel.BulkCreate의 1회분: 비용 차감 -> 뽑기 -> 뽑힌 티어만큼 인구 사용(음수까지 내려갈 수 있음).
-    public bool TryCreate(OccupantKind kind, out BalanceHero created)
+    public bool TryCreate(OccupantKind kind, out BalanceHero created) => TryCreate(kind, null, out created);
+
+    // forced가 있으면 뽑기 결과 대신 그 영웅으로 고정한다(플레이 기록 재현 - 실제로 나온 영웅). 비용·인구·뽑기 순번은 같게 쓴다.
+    public bool TryCreate(OccupantKind kind, HeroData forced, out BalanceHero created)
     {
         created = null;
         if (GetBlockReason(kind) != null) return false;
@@ -133,6 +136,7 @@ public class BalanceHeroWorld
             economy.Resources.ProductChanged(cost.Multiply(-1));
             return false;
         }
+        if (forced != null) picked = forced;
 
         economy.Citizens.UseCitizenForHero(picked.PopulationCost);
         created = new BalanceHero { Data = picked, CitizenCost = picked.PopulationCost };
@@ -149,7 +153,14 @@ public class BalanceHeroWorld
     public bool TryMerge(OccupantKind kind, int tier, out BalanceHero merged) =>
         TryMerge(hero => hero.Kind == kind && hero.Data.Tier == tier, out merged);
 
-    private bool TryMerge(System.Predicate<BalanceHero> filter, out BalanceHero merged)
+    // from 영웅 3명을 합성해 결과를 to로 고정한다(플레이 기록 재현 - 실제로 나온 영웅).
+    public bool TryMerge(HeroData from, HeroData to, out BalanceHero merged) =>
+        TryMerge(hero => hero.Data == from, out merged, to);
+
+    // 이름·티어로 영웅 데이터를 찾는다(플레이 기록의 "BraveCitizen(T1)"). 없으면 null.
+    public HeroData FindHero(string name, int tier) => assets.Pool.Find(data => data.HeroName == name && data.Tier == tier);
+
+    private bool TryMerge(System.Predicate<BalanceHero> filter, out BalanceHero merged, HeroData forced = null)
     {
         merged = null;
         List<BalanceHero> group = FindMergeGroup(filter, out List<HeroData> nextTier);
@@ -158,7 +169,7 @@ public class BalanceHeroWorld
         OccupantKind kind = group[0].Kind;
         int tier = group[0].Data.Tier;
         System.Random rng = new System.Random(GameSeeding.Derive(seed, ConsumeCombine(kind, tier)));
-        HeroData next = nextTier[rng.Next(nextTier.Count)];
+        HeroData next = forced ?? nextTier[rng.Next(nextTier.Count)];
 
         int refund = 0;
         foreach (BalanceHero member in group)

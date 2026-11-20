@@ -113,6 +113,21 @@ public class EconomySimWorld : IDisposable
         for (int count = 0; count < amount; count++) Resources.GetSpecial();
     }
 
+    // 세이브·플레이 기록의 건물 이름(ProductionValue.FacilityName)으로 자원 종류를 찾는다.
+    public bool TryFindFacilityType(string facilityName, out ProductionType type)
+    {
+        foreach (var (candidate, option) in facilityOptions)
+        {
+            if (option.facilityValue.FacilityName != facilityName) continue;
+            type = candidate;
+            return true;
+        }
+        type = default;
+        return false;
+    }
+
+    public bool IsHouseName(string name) => houseOption.houseConfig.HouseName == name;
+
     // 건설 비용(음수, 할인 반영) - BaseConstructor.CanBuild가 보는 값과 같다.
     public (ProductionType Type, int Amount)[] BuildCost(ProductionType type) =>
         facilityOptions.TryGetValue(type, out BuildableFacility option)

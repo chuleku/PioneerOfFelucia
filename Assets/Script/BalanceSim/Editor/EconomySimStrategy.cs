@@ -54,9 +54,10 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     // 미리 정해둔 비교용 봇들.
     public static List<IEconomySimStrategy> CreatePresets()
     {
-        return new List<IEconomySimStrategy>
+        // 기준점: 플레이 기록기 파일(Logs/PlayRecords, 최근 3개)과 손으로 정리한 기록. 기록이 끝난 날부터는 균형 봇이 이어 받는다.
+        var presets = new List<IEconomySimStrategy>(ReplayEconomyStrategy.FromRecords(CreateBalanced));
+        presets.AddRange(new List<IEconomySimStrategy>
         {
-            // 기준점: 실제 플레이 기록. 기록이 끝난 뒤(13일차~)는 균형 봇이 이어 받는다.
             ReplayEconomyStrategy.CreateUserPlay(CreateBalanced()),
             CreateBalanced(),
             new RuleEconomyStrategy("건설자원 우선", Weights(2, 1, 1, 1, 2), false, HeroSpendPolicy.Alternate),
@@ -65,7 +66,8 @@ public class RuleEconomyStrategy : IEconomySimStrategy
             new RuleEconomyStrategy("영웅 먼저", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.BeforeEconomy),
             new RuleEconomyStrategy("재배치", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.Alternate, rebalance: true),
             new RuleEconomyStrategy("경제만(영웅 없음)", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.None),
-        };
+        });
+        return presets;
     }
 
     // 균형 = 실제 플레이 방식. 가중치는 1~2지역을 다 채웠을 때의 실제 구성(목재·석재·금 2, 철 3, 식량 1 - 2지역은 식량 빼고 철 2개).

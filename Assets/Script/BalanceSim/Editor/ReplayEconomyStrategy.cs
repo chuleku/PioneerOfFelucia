@@ -5,7 +5,7 @@ using System.Collections.Generic;
 // 잡으면 규칙형 봇의 운영이 실제보다 약한 것이다 - 둘을 가르는 기준점으로 쓴다.
 // 행동이 실패하면 다른 행동으로 바꾸지 않고 "✗ 행동(이유)"로 남긴다. 기록은 종류별로 묶어 적은 것이라
 // 순서가 실제와 다를 수 있어, 실패한 행동은 그날 마지막에 한 번 더 시도한다.
-public class ReplayEconomyStrategy : IEconomySimStrategy
+public partial class ReplayEconomyStrategy : IEconomySimStrategy
 {
     private const string MissMark = "✗ ";
     private const string ExtraMark = "+ ";      // 기록 밖에서 남은 펠리움으로 더 한 행동
@@ -28,15 +28,19 @@ public class ReplayEconomyStrategy : IEconomySimStrategy
 
     private readonly Dictionary<int, List<ReplayStep>> script;
     private readonly IEconomySimStrategy fallback;
+    // 남은 펠리움으로 영웅을 더 뽑을지. 손으로 정리한 기록(교환을 빼먹었을 수 있다)만 켜고, 기록기 파일은 교환까지 다 적혀 있어 끈다.
+    private readonly bool spendLeftoverFelium;
 
     public string Name { get; }
     public bool UsesHeroes => true;
 
-    private ReplayEconomyStrategy(string name, Dictionary<int, List<ReplayStep>> script, IEconomySimStrategy fallback)
+    private ReplayEconomyStrategy(string name, Dictionary<int, List<ReplayStep>> script, IEconomySimStrategy fallback,
+        bool spendLeftoverFelium = true)
     {
         Name = name;
         this.script = script;
         this.fallback = fallback;
+        this.spendLeftoverFelium = spendLeftoverFelium;
     }
 
     public void PlayDay(EconomySimWorld world, BalanceHeroWorld heroes, EconomySimDayLog log)
@@ -66,7 +70,7 @@ public class ReplayEconomyStrategy : IEconomySimStrategy
 
         // 실제 플레이는 기록대로 하고도 펠리움이 남았다(10일차 끝 5개) - 남은 펠리움은 영웅 소환에 더 쓴다.
         var extra = new List<string>();
-        SpendFeliumOnHeroes(world, heroes, log, extra, FeliumReservedAfter(log.Day));
+        if (spendLeftoverFelium) SpendFeliumOnHeroes(world, heroes, log, extra, FeliumReservedAfter(log.Day));
 
         log.ReplayMisses += misses.Count;
         log.Actions.AddRange(Compress(done));
