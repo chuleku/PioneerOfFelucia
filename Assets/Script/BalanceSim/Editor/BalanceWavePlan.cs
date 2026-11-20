@@ -17,6 +17,8 @@ public class BalanceSpawnGroup
     public float Attack;
     public float Defense;
     public float TilesPerSecond;
+    public float AttackCycle;   // 공격 한 번 주기(초) = 1/공속 + 공격 모션 길이(BalanceEnemyMotion)
+    public float MovingShare;   // 영웅을 때리며 걷는 동안 실제로 움직이는 시간 비율(모션 중엔 멈춘다)
     public string Source;     // "일반" / "증원" / "보스"
 }
 
@@ -149,6 +151,8 @@ public static class BalanceWavePlan
             Defense = (enemy.Defense + enemy.UpDefenseScale * fiveDayStep)
                 * (RegionScale(DefenseTable, BossDefenseTable, enemyClass, unlocked) + BossBonus(enemyClass, day, roundsSinceFullUnlock, BossDefStep)),
             TilesPerSecond = enemy.MoveSpeed / plan.Region.CellSize,
+            AttackCycle = BalanceEnemyMotion.AttackCycle(wave.Prefab, enemy.AttackSpeed),
+            MovingShare = BalanceEnemyMotion.MovingShare(wave.Prefab, enemy.AttackSpeed),
             Source = source,
         });
     }

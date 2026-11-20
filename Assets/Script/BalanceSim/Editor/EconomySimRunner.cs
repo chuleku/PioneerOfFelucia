@@ -39,6 +39,9 @@ public class EconomySimDayLog
     public int FeliumUsed;     // 낮 동안 교환에 쓴 개수
     public int FeliumEnd;      // 지급 후 보유량
 
+    // 실플레이 재현 봇에서 기록대로 못 한 행동 수(다른 봇은 0)
+    public int ReplayMisses;
+
     // 전투(3단계, 전투를 켰을 때만)
     public bool HasBattle;
     public int BaseHp;            // 밤이 끝난 뒤 본진 체력
@@ -160,7 +163,7 @@ public static class EconomySimRunner
         log.Placed = night.Placed;
         log.Inventory = night.Inventory;
         log.HeroDeaths = night.HeroDeaths;
-        log.BattleNote = string.Join(" · ", night.RegionNotes) + (night.TimedOut ? " · 시간 초과" : string.Empty)
+        log.BattleNote = $"[{BalanceBattle.PlacementName(night.Placement)}] " + string.Join(" · ", night.RegionNotes) + (night.TimedOut ? " · 시간 초과" : string.Empty)
             + (night.BossNote != null ? $" · {night.BossNote}" : string.Empty);
         return (log.PerfectNight ? PerfectNightFelium : 0) + (night.BossKilled ? BossFelium : 0);
     }

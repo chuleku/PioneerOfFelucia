@@ -16,6 +16,7 @@ public class BalanceNightResult
     public int Inventory;         // 칸이 없어 못 놓은 영웅 수
     public bool TimedOut;         // 제한 시간 안에 안 끝나 남은 적을 새어 나간 것으로 처리했다
     public string BossNote;       // 보스 결과 상세(남은 체력, 막힌 시간, 사거리 안에 있던 영웅 수)
+    public BalancePlacement Placement; // 이 밤에 쓴 근접 배치 방식(자동이면 고른 쪽)
     public readonly List<string> RegionNotes = new(); // "지역1 누수 2" 같은 요약
 }
 
@@ -47,6 +48,7 @@ public class BalanceFieldHero
     public float Hp;
     public float Cooldown;
     public int Blocking;
+    public object Target;   // 지금 잡고 있는 적(BalanceBattle.BattleEnemy). 죽거나 사거리를 벗어나면 새로 잡는다
     public bool Alive => Hp > 0f;
     public readonly Dictionary<int, float> HitByDefense = new(); // 적 방어력별 평균 1타(HeroSimCalc) 캐시
 }
@@ -76,12 +78,16 @@ public static class BalanceBattle
 {
     private const float StepSeconds = 0.25f;
     private const float MaxNightSeconds = 600f;      // 이 시간 안에 안 끝나면 남은 적은 새어 나간 것으로 본다
-    // 원거리 적은 사거리에 영웅이 있으면 공격 모션 동안 멈췄다가(EnemyBase.Attack -> _move.Pause) 다시 걷는다.
-    // 모션 길이를 몰라 "그동안은 절반 속도로 걷는다"로 줄여 둔다.
-    private const float RangedAttackMoveFactor = 0.5f;
-    private const float CoreLanePreference = 0.66f;   // 근접 저지 칸은 레인의 이 비율 지점(본진 쪽 2/3)에 가까울수록 좋게 본다
-    private const float BlockTileCoverageBonus = 3f;  // 원거리 영웅이 저지 칸을 사거리에 넣으면 칸당 이만큼 더 친다
+    // 근접 저지 칸은 레인의 이 비율 지점에 가까울수록 좋게 본다(0 = 포탈 입구, 1 = 본진).
+    private const float EntranceLanePreference = 0f;
+    private const float CoreLanePreference = 0.66f;
+    // 원거리 영웅이 저지 칸을 사거리에 넣으면 칸당 이만큼 더 친다. 입구 집중이면 막힌 적을 같이 때리는 게 핵심이라 크게 준다.
+    private const float EntranceBlockCoverageBonus = 10f;
+    private const float CoreBlockCoverageBonus = 3f;
     private const int LaneTileScore = 1000;           // 근접 칸 점수: 지나가는 레인 1개 = 이 점수
+    // 경로 분산: 다른 근접과 경로상 거리(레인 길이 비율) 가산, 같은 거리면 입구 쪽 가산. 레인 1개 점수보다는 작게.
+    private const float SpreadGapScore = 600f;
+    private const float SpreadEntranceScore = 100f;
     private const int NormalLeakDamage = 1;           // GameManager.HpDamage
     private const int EliteLeakDamage = 2;
     private const string PortalSeedSuffix = ":portal";
@@ -92,12 +98,48 @@ public static class BalanceBattle
 
     public static BalanceNightResult RunNight(BalanceBattleAssets assets, BalanceHeroWorld heroes, int day, string seed)
     {
-        var result = new BalanceNightResult();
+        if (assets.Placement != BalancePlacement.Auto) return RunNight(assets, heroes, day, seed, assets.Placement);
+
+        // 같은 시드라 적 구성·포탈은 그대로고 배치만 다르다 - 가장 나은 밤을 고른다.
+        BalanceNightResult best = null;
+        foreach (BalancePlacement placement in ManualPlacements)
+        {
+            BalanceNightResult night = RunNight(assets, heroes, day, seed, placement);
+            if (best == null || IsBetter(night, best)) best = night;
+        }
+        return best;
+    }
+
+    private static readonly BalancePlacement[] ManualPlacements =
+        { BalancePlacement.Entrance, BalancePlacement.Spread, BalancePlacement.Core };
+
+    // 보스 누수 없음 -> 본진 피해 적음 -> 보스 처치 -> 영웅 사망 적음 -> 처치 많음 순으로 비교.
+    private static bool IsBetter(BalanceNightResult night, BalanceNightResult best)
+    {
+        if (night.BossLeaked != best.BossLeaked) return !night.BossLeaked;
+        if (night.BaseDamage != best.BaseDamage) return night.BaseDamage < best.BaseDamage;
+        if (night.BossKilled != best.BossKilled) return night.BossKilled;
+        if (night.HeroDeaths != best.HeroDeaths) return night.HeroDeaths < best.HeroDeaths;
+        return night.Killed > best.Killed;
+    }
+
+    public static string PlacementName(BalancePlacement placement) => placement switch
+    {
+        BalancePlacement.Entrance => "입구 집중",
+        BalancePlacement.Spread => "경로 분산",
+        BalancePlacement.Core => "본진 쪽",
+        _ => "자동",
+    };
+
+    private static BalanceNightResult RunNight(BalanceBattleAssets assets, BalanceHeroWorld heroes, int day, string seed,
+        BalancePlacement placement)
+    {
+        var result = new BalanceNightResult { Placement = placement };
         List<BalanceNightPlan> plans = BalanceWavePlan.Build(assets, day);
         var activeLanes = new List<List<int>>();
         foreach (BalanceNightPlan plan in plans) activeLanes.Add(PickActiveLanes(plan, seed, day));
 
-        List<List<BalanceFieldHero>> placed = Place(heroes, plans, activeLanes, result, assets);
+        List<List<BalanceFieldHero>> placed = Place(heroes, plans, activeLanes, result, assets, placement);
         for (int index = 0; index < plans.Count; index++)
         {
             RunRegion(plans[index], activeLanes[index], placed[index], seed, day, result);
@@ -137,7 +179,7 @@ public static class BalanceBattle
 
     // 강한 영웅부터 위협(체력×마릿수) 대비 배치 전력이 가장 모자란 지역에 놓는다. 칸이 없으면 인벤토리에 남는다.
     private static List<List<BalanceFieldHero>> Place(BalanceHeroWorld heroes, List<BalanceNightPlan> plans,
-        List<List<int>> activeLanes, BalanceNightResult result, BalanceBattleAssets assets)
+        List<List<int>> activeLanes, BalanceNightResult result, BalanceBattleAssets assets, BalancePlacement placement)
     {
         var placed = new List<List<BalanceFieldHero>>();
         var threat = new List<float>();
@@ -159,7 +201,8 @@ public static class BalanceBattle
             BalanceFieldHero field = BuildFieldHero(heroes, hero, assets);
             if (field != null) candidates.Add(field);
         }
-        candidates.Sort((left, right) => right.Dps.CompareTo(left.Dps));
+        // 근접(저지 자리)을 먼저 다 세워야 원거리가 그 칸을 사거리에 넣는 자리를 고를 수 있다. 같은 종류 안에서는 강한 순.
+        candidates.Sort((left, right) => left.IsMelee != right.IsMelee ? right.IsMelee.CompareTo(left.IsMelee) : right.Dps.CompareTo(left.Dps));
 
         foreach (BalanceFieldHero field in candidates)
         {
@@ -169,7 +212,7 @@ public static class BalanceBattle
                 result.Inventory++;
                 continue;
             }
-            field.Tile = BestTile(plans[region], activeLanes[region], used[region], placed[region], field);
+            field.Tile = BestTile(plans[region], activeLanes[region], used[region], placed[region], field, placement);
             used[region].Add(field.Tile);
             placed[region].Add(field);
             assigned[region] += field.Dps;
@@ -203,19 +246,23 @@ public static class BalanceBattle
         return false;
     }
 
-    // 근접: 활성 레인이 많이 지나가고 본진 쪽 2/3 지점에 가까운 레인 칸(저지 자리). 레인 위 칸이 없으면 원거리처럼 고른다.
+    // 근접: 활성 레인이 많이 지나가고 정한 지점(입구 또는 본진 쪽 2/3)에 가까운 레인 칸(저지 자리). 레인 위 칸이 없으면 원거리처럼 고른다.
+    //   경로 분산은 지점 대신 이미 선 근접과 경로상 멀리 떨어진 칸을 고른다.
     // 원거리: 사거리에 들어오는 활성 레인 칸 수 + 이미 놓인 저지 칸을 사거리에 넣은 만큼 가산.
     private static Vector2Int BestTile(BalanceNightPlan plan, List<int> activeLanes, HashSet<Vector2Int> used,
-        List<BalanceFieldHero> placed, BalanceFieldHero field)
+        List<BalanceFieldHero> placed, BalanceFieldHero field, BalancePlacement placement)
     {
         BalanceRegion region = plan.Region;
+        float blockBonus = placement == BalancePlacement.Core ? CoreBlockCoverageBonus : EntranceBlockCoverageBonus;
         Vector2Int best = default;
         float bestScore = float.MinValue;
         foreach (Vector2Int tile in field.IsMelee ? region.MeleeTiles : region.RangedTiles)
         {
             if (used.Contains(tile)) continue;
-            float score = field.IsMelee ? BlockScore(region, activeLanes, tile) : 0f;
-            score += CoverageScore(region, activeLanes, placed, field, tile);
+            float score = !field.IsMelee ? 0f
+                : placement == BalancePlacement.Spread ? SpreadScore(region, activeLanes, placed, tile)
+                : BlockScore(region, activeLanes, tile, placement == BalancePlacement.Core ? CoreLanePreference : EntranceLanePreference);
+            score += CoverageScore(region, activeLanes, placed, field, tile, blockBonus);
             if (score <= bestScore) continue;
             bestScore = score;
             best = tile;
@@ -223,7 +270,7 @@ public static class BalanceBattle
         return best;
     }
 
-    private static float BlockScore(BalanceRegion region, List<int> activeLanes, Vector2Int tile)
+    private static float BlockScore(BalanceRegion region, List<int> activeLanes, Vector2Int tile, float lanePreference)
     {
         float score = 0f;
         foreach (int lane in activeLanes)
@@ -232,13 +279,37 @@ public static class BalanceBattle
             int index = path.IndexOf(tile);
             if (index < 0) continue;
             float position = path.Count > 1 ? (float)index / (path.Count - 1) : 0f;
-            score += LaneTileScore * (1f - Mathf.Abs(position - CoreLanePreference));
+            score += LaneTileScore * (1f - Mathf.Abs(position - lanePreference));
+        }
+        return score;
+    }
+
+    // 경로 분산: 지나가는 활성 레인 수가 우선(갈라진 레인이 합쳐진 뒤에 서면 한 명이 모든 포탈을 막는다).
+    // 그다음 이미 선 근접과 경로상 거리가 먼 칸 - 앞 근접을 지나친 적을 뒤 근접이 다시 막는다. 첫 근접은 입구 쪽.
+    private static float SpreadScore(BalanceRegion region, List<int> activeLanes, List<BalanceFieldHero> placed, Vector2Int tile)
+    {
+        float score = 0f;
+        foreach (int lane in activeLanes)
+        {
+            List<Vector2Int> path = region.GroundLanes[lane];
+            int index = path.IndexOf(tile);
+            if (index < 0) continue;
+
+            int gap = path.Count;
+            foreach (BalanceFieldHero other in placed)
+            {
+                if (!other.IsMelee) continue;
+                int otherIndex = path.IndexOf(other.Tile);
+                if (otherIndex >= 0) gap = Mathf.Min(gap, Mathf.Abs(index - otherIndex));
+            }
+            float position = path.Count > 1 ? (float)index / (path.Count - 1) : 0f;
+            score += LaneTileScore + SpreadGapScore * gap / path.Count + SpreadEntranceScore * (1f - position);
         }
         return score;
     }
 
     private static float CoverageScore(BalanceRegion region, List<int> activeLanes, List<BalanceFieldHero> placed,
-        BalanceFieldHero field, Vector2Int tile)
+        BalanceFieldHero field, Vector2Int tile, float blockBonus)
     {
         float score = 0f;
         foreach (int lane in activeLanes)
@@ -250,7 +321,7 @@ public static class BalanceBattle
         }
         foreach (BalanceFieldHero other in placed)
         {
-            if (other.IsMelee && BalanceRange.Contains(tile, other.Tile, field.Range, field.Shape)) score += BlockTileCoverageBonus;
+            if (other.IsMelee && BalanceRange.Contains(tile, other.Tile, field.Range, field.Shape)) score += blockBonus;
         }
         return score;
     }
@@ -325,10 +396,12 @@ public static class BalanceBattle
             hero.Hp = hero.MaxHp;
             hero.Cooldown = 0f;
             hero.Blocking = 0;
+            hero.Target = null;
             if (hero.IsMelee) meleeByTile[hero.Tile] = hero;
         }
 
         int leakedBefore = result.Leaked;
+        int deathsBefore = result.HeroDeaths;
         int remaining = enemies.Count;
         result.Spawned += enemies.Count;
         for (float time = 0f; remaining > 0 && time < MaxNightSeconds; time += StepSeconds)
@@ -355,7 +428,7 @@ public static class BalanceBattle
             Leak(enemy, result);
         }
         result.RegionNotes.Add($"지역{plan.Region.Region} 누수 {result.Leaked - leakedBefore}/{enemies.Count} " +
-            $"(근접 {meleeByTile.Count}·저지 칸 {BlockingTiles(meleeByTile, plan.Region, activeLanes)}·원거리 {heroes.Count - meleeByTile.Count})");
+            $"(근접 {meleeByTile.Count}·저지 칸 {BlockingTiles(meleeByTile, plan.Region, activeLanes)}·원거리 {heroes.Count - meleeByTile.Count}·영웅 사망 {result.HeroDeaths - deathsBefore})");
     }
 
     // 근접 영웅 중 오늘 활성 레인 위에 선 수(실제로 저지할 수 있는 영웅).
@@ -424,7 +497,11 @@ public static class BalanceBattle
             return;
         }
 
-        targets.Sort((left, right) => left.Remaining.CompareTo(right.Remaining));
+        // Hero.Update: 잡은 대상이 사거리에 있으면 계속 치고, 없으면 영웅에게 가장 가까운 적을 새로 잡는다(AcquireTargetFromTiles).
+        // 그래서 근접은 자기가 막은 적(같은 칸)을 먼저 잡는다 - 본진에 가까운 순으로 치면 지나가는 적만 쫓다 둘 다 놓친다.
+        targets.Sort((left, right) => DistanceSquared(hero.Tile, left.Tile).CompareTo(DistanceSquared(hero.Tile, right.Tile)));
+        if (hero.Target is BattleEnemy current && targets.Remove(current)) targets.Insert(0, current);
+        hero.Target = targets[0];
         int centers = hero.AttackType == AttackType.Area ? 1 : Mathf.Min(hero.TargetCount, targets.Count);
         for (int index = 0; index < centers; index++)
         {
@@ -433,6 +510,8 @@ public static class BalanceBattle
         }
         hero.Cooldown += hero.AttackInterval;
     }
+
+    private static int DistanceSquared(Vector2Int a, Vector2Int b) => (a - b).sqrMagnitude;
 
     // 못 때리는 특성(기본: 공중·은신)이면 제외. 은신·잠행은 저지당했을 때만 맞는다(EnemyAttribute 주석).
     private static bool CanTarget(BalanceFieldHero hero, BattleEnemy enemy)
@@ -491,13 +570,13 @@ public static class BalanceBattle
         if (target != null && enemy.Cooldown <= 0f)
         {
             target.Hp -= Mathf.Max(1f, Mathf.Floor(enemy.Group.Attack) - target.Defense); // Hero.TakeDamage
-            enemy.Cooldown += enemy.Group.Enemy.AttackSpeed > 0f ? 1f / enemy.Group.Enemy.AttackSpeed : 1f;
+            enemy.Cooldown += enemy.Group.AttackCycle; // EnemyBase.RunAttackLoop: 모션 중엔 타이머가 멈춘다
             if (!target.Alive) HeroDied(target, result);
         }
         if (target == null) enemy.Cooldown = Mathf.Max(enemy.Cooldown, 0f);
         if (enemy.Blocker != null) return;
 
-        float speed = enemy.Group.TilesPerSecond * (target != null ? RangedAttackMoveFactor : 1f);
+        float speed = enemy.Group.TilesPerSecond * (target != null ? enemy.Group.MovingShare : 1f);
         Move(enemy, speed * StepSeconds, meleeByTile, ref remaining, result);
     }
 
@@ -531,7 +610,8 @@ public static class BalanceBattle
         return nearest;
     }
 
-    // 새 칸에 들어설 때마다 그 칸의 근접 영웅이 아직 막을 자리가 있으면 멈춘다(BlockCalc: 들어온 순서 < BLK).
+    // 지금 칸 또는 새로 들어서는 칸의 근접 영웅이 아직 막을 자리가 있으면 멈춘다(BlockCalc: 그 칸에 있는 적 중 순서 < BLK).
+    // 지금 칸도 보는 이유: 게임은 매 프레임 다시 판정해서, 막혀 있던 적이 죽으면 그 칸을 지나던 적이 바로 저지된다.
     // 공중·저지 불가 적은 막히지 않는다. 경로 끝에 닿으면 본진 피해.
     private static void Move(BattleEnemy enemy, float distance, Dictionary<Vector2Int, BalanceFieldHero> meleeByTile,
         ref int remaining, BalanceNightResult result)
@@ -541,7 +621,7 @@ public static class BalanceBattle
         enemy.Progress += distance;
         int to = Mathf.Min(Mathf.FloorToInt(enemy.Progress), enemy.Path.Count - 1);
 
-        for (int index = from + 1; blockable && index <= to; index++)
+        for (int index = from; blockable && index <= to; index++)
         {
             if (!meleeByTile.TryGetValue(enemy.Path[index], out BalanceFieldHero blocker)) continue;
             if (!blocker.Alive || blocker.Blocking >= blocker.BlockCount) continue;

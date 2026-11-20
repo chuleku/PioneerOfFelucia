@@ -53,7 +53,7 @@ public static class BalanceWavePanel
             GUILayout.Label("체력", GUILayout.Width(NumberWidth));
             GUILayout.Label("공격", GUILayout.Width(NumberWidth));
             GUILayout.Label("방어", GUILayout.Width(NumberWidth));
-            GUILayout.Label("공속", GUILayout.Width(NumberWidth));
+            GUILayout.Label("공속(실제 주기)", GUILayout.Width(WideWidth));
             GUILayout.Label("사거리", GUILayout.Width(NumberWidth));
             GUILayout.Label("칸/초", GUILayout.Width(NumberWidth));
             GUILayout.Label("등급·타입", GUILayout.Width(WideWidth));
@@ -70,7 +70,7 @@ public static class BalanceWavePanel
                 GUILayout.Label($"{group.Hp:N0}", GUILayout.Width(NumberWidth));
                 GUILayout.Label($"{group.Attack:N1}", GUILayout.Width(NumberWidth));
                 GUILayout.Label($"{group.Defense:N1}", GUILayout.Width(NumberWidth));
-                GUILayout.Label($"{group.Enemy.AttackSpeed:N2}", GUILayout.Width(NumberWidth));
+                GUILayout.Label($"{group.Enemy.AttackSpeed:N2} ({group.AttackCycle:N2}초)", GUILayout.Width(WideWidth));
                 GUILayout.Label(group.Enemy.Range.ToString(), GUILayout.Width(NumberWidth));
                 GUILayout.Label($"{group.TilesPerSecond:N2}", GUILayout.Width(NumberWidth));
                 GUILayout.Label($"{group.Class}·{group.Type}", GUILayout.Width(WideWidth));

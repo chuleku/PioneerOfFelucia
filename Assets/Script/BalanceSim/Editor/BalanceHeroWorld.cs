@@ -141,10 +141,16 @@ public class BalanceHeroWorld
 
     // HeroCombineManager.Combine: 같은 MergeKey(UnitId+티어) 3개 -> 같은 종류 다음 티어 중 하나.
     // 원본 3개의 인구를 돌려받고 결과 티어만큼 다시 쓴다. 로스터 앞에서부터 처음 모인 묶음 하나만 합성한다.
-    public bool TryMergeAny(out BalanceHero merged)
+    public bool TryMergeAny(out BalanceHero merged) => TryMerge(_ => true, out merged);
+
+    // 지정한 종류·티어의 묶음만 합성한다(실플레이 재현용).
+    public bool TryMerge(OccupantKind kind, int tier, out BalanceHero merged) =>
+        TryMerge(hero => hero.Kind == kind && hero.Data.Tier == tier, out merged);
+
+    private bool TryMerge(System.Predicate<BalanceHero> filter, out BalanceHero merged)
     {
         merged = null;
-        List<BalanceHero> group = FindMergeGroup(out List<HeroData> nextTier);
+        List<BalanceHero> group = FindMergeGroup(filter, out List<HeroData> nextTier);
         if (group == null) return false;
 
         OccupantKind kind = group[0].Kind;
@@ -166,12 +172,13 @@ public class BalanceHeroWorld
     }
 
     // 다음 티어 데이터가 있는 MergeKey 중 처음으로 3개가 모인 묶음.
-    private List<BalanceHero> FindMergeGroup(out List<HeroData> nextTier)
+    private List<BalanceHero> FindMergeGroup(System.Predicate<BalanceHero> filter, out List<HeroData> nextTier)
     {
         nextTier = null;
         var groups = new Dictionary<MergeKey, List<BalanceHero>>();
         foreach (BalanceHero hero in Roster)
         {
+            if (!filter(hero)) continue;
             if (!groups.TryGetValue(hero.Data.MergeKey, out List<BalanceHero> group))
             {
                 group = new List<BalanceHero>();
@@ -200,6 +207,12 @@ public class BalanceHeroWorld
         }
         return heroType >= 0 && ClassUpgrades.TryLevelUp(heroType);
     }
+
+    // 지정한 직업만 강화한다(실플레이 재현용).
+    public bool TryClassUpgrade(int heroType) =>
+        ClassUpgrades.CanLevelUp(heroType)
+        && economy.Resources.CheckResources(ClassUpgrades.GetNextLevelCost(heroType))
+        && ClassUpgrades.TryLevelUp(heroType);
 
     // 보유 영웅 전원의 초당 피해·체력 합계(방어 0 기준, 배치·시너지 미반영). 영웅 시뮬레이터(HeroSimBuilder)와 같은 계산.
     public (float Dps, float Hp) CalculatePower()

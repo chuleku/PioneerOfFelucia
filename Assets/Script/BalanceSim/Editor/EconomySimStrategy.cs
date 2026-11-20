@@ -50,6 +50,8 @@ public class RuleEconomyStrategy : IEconomySimStrategy
     {
         return new List<IEconomySimStrategy>
         {
+            // 기준점: 실제 플레이 기록. 기록이 끝난 뒤(11일차~)는 균형 봇이 이어 받는다.
+            ReplayEconomyStrategy.CreateUserPlay(new RuleEconomyStrategy("균형", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.Alternate)),
             new RuleEconomyStrategy("균형", Weights(1, 1, 1, 1, 1), false, HeroSpendPolicy.Alternate),
             new RuleEconomyStrategy("건설자원 우선", Weights(2, 1, 1, 1, 2), false, HeroSpendPolicy.Alternate),
             new RuleEconomyStrategy("강화 우선", Weights(1, 1, 1, 1, 1), true, HeroSpendPolicy.Alternate),

@@ -21,6 +21,15 @@ public class BalanceRegion
     public readonly List<Vector2Int> RangedTiles = new();                   // 원거리 영웅을 놓을 수 있는 칸
 }
 
+// 근접 배치 방식. 원거리는 어느 방식이든 근접이 선 저지 칸을 사거리에 넣는 자리를 고른다.
+public enum BalancePlacement
+{
+    Auto,       // 밤마다 아래 셋을 다 해 보고 피해가 가장 적은 쪽
+    Entrance,   // 포탈 입구 바로 앞부터
+    Spread,     // 여러 레인이 함께 지나는 칸에, 경로를 따라 서로 멀리 나눠서(앞을 지나친 적을 뒤에서 다시 막는다)
+    Core,       // 레인의 본진 쪽 2/3 지점
+}
+
 // 전투 계산에 쓰는 값 묶음. 지형·본진 체력은 MainScene에서, 웨이브·적·포탈은 CSV 표에서 읽는다.
 public class BalanceBattleAssets
 {
@@ -31,6 +40,8 @@ public class BalanceBattleAssets
     // 스킬·버프·장판 등 시뮬에 없는 영웅 능력을 실제 플레이 결과에 맞춰 메우는 보정(%). 창에서 입력한다.
     public int HeroDamagePercent = 100;
     public int HeroHpPercent = 100;
+    // 근접을 어디에 세울지. 자동이면 밤마다 나머지 방식을 다 돌려 보고 피해가 가장 적은 쪽을 쓴다(실제 플레이어의 재배치).
+    public BalancePlacement Placement = BalancePlacement.Auto;
     public int BaseHp;                                              // GameManager 프리팹의 hp(타이틀 강화 전)
     public readonly List<BaseUpgradeData> BaseHpUpgrades = new();   // GameManager.hpUpgrades - 타이틀 강화로 늘어나는 본진 체력
 

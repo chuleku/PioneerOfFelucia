@@ -23,6 +23,7 @@ public class EconomySimWindow : EditorWindow
     private const string BaseHpTitleLabel = "본진 체력";
     private const string HeroDamageLabel = "영웅 피해 보정(%)";
     private const string HeroHpLabel = "영웅 체력 보정(%)";
+    private const string PlacementLabel = "배치 방식";
     private const string BattleDetailHeader = "전투 상세 (누수가 있었거나 보스가 나온 밤)";
     private const int MinimumTuningPercent = 10;
     private const int MaximumTuningPercent = 500;
@@ -50,6 +51,7 @@ public class EconomySimWindow : EditorWindow
     private const string CsvExtension = "csv";
     private const string DefaultSeed = "balance";
     private const string NoBattleMark = "-";
+    private const string MissedRunsTooltip = "✗n판: 실플레이 재현 봇이 기록대로 못 한 행동이 있던 판 수. 어떤 행동인지는 일별 표의 ✗ 줄에서 본다.";
 
     private const int MinimumDays = 1;
     private const int MaximumDays = 200;
@@ -87,6 +89,11 @@ public class EconomySimWindow : EditorWindow
     private static readonly Color ChartBackground = new Color(0f, 0f, 0f, 0.2f);
     private static readonly string[] ResourceNames = Enum.GetNames(typeof(ProductionType));
     private static readonly string[] ChartModes = { "자원", "전투력" };
+    // BalancePlacement 순서와 같다.
+    private static readonly string[] PlacementModes =
+    {
+        "자동(밤마다 셋 다 해 보고 피해 적은 쪽)", "입구 집중(근접을 포탈 앞에)", "경로 분산(근접을 경로 따라 나눠)", "본진 쪽(레인 2/3 지점)",
+    };
 
     // 전략 하나를 시드 여러 개로 돌린 마지막 날 요약.
     private class StrategySummary
@@ -107,6 +114,7 @@ public class EconomySimWindow : EditorWindow
         public float PerfectNights;
         public float BossKills;
         public float FinalBaseHp;
+        public int MissedRuns;      // 실플레이 재현 봇이 기록대로 못 한 행동이 하나라도 있던 판 수
         public readonly Dictionary<string, int> BlockDays = new(); // 막힌 이유별 일수(시드 전체 합)
     }
 
@@ -129,6 +137,7 @@ public class EconomySimWindow : EditorWindow
     private float lastRunSeconds;
     private int heroDamagePercent = 100;
     private int heroHpPercent = 100;
+    private int placementMode = (int)BalancePlacement.Auto;
     private Vector2 detailScroll;
     private string[] strategyNames = Array.Empty<string>();
     private string poolNote = string.Empty;
@@ -210,6 +219,7 @@ public class EconomySimWindow : EditorWindow
         {
             heroDamagePercent = EditorGUILayout.IntSlider(HeroDamageLabel, heroDamagePercent, MinimumTuningPercent, MaximumTuningPercent);
             heroHpPercent = EditorGUILayout.IntSlider(HeroHpLabel, heroHpPercent, MinimumTuningPercent, MaximumTuningPercent);
+            placementMode = EditorGUILayout.Popup(PlacementLabel, placementMode, PlacementModes);
         }
         // 가정 모드 입력은 전투를 끌 때만 쓴다.
         using (new EditorGUI.DisabledScope(feliumInput.UseBattle))
@@ -307,6 +317,7 @@ public class EconomySimWindow : EditorWindow
         if (battleAssets == null) return;
         battleAssets.HeroDamagePercent = heroDamagePercent;
         battleAssets.HeroHpPercent = heroHpPercent;
+        battleAssets.Placement = (BalancePlacement)placementMode;
     }
 
     private string RunSeed(int run) => $"{seed}-{run}";
@@ -325,6 +336,7 @@ public class EconomySimWindow : EditorWindow
         summary.HasBattle = last.HasBattle;
         summary.FinalBaseHp += last.BaseHp;
         if (last.GameOver) summary.Defeats++;
+        if (result.Exists(log => log.ReplayMisses > 0)) summary.MissedRuns++;
 
         foreach (EconomySimDayLog log in result)
         {
@@ -398,7 +410,9 @@ public class EconomySimWindow : EditorWindow
         {
             using (new EditorGUILayout.HorizontalScope())
             {
-                GUILayout.Label(summary.Name, GUILayout.Width(StrategyWidth));
+                // 재현 봇이 기록과 어긋난 판(합성할 같은 영웅이 안 모인 시드 등)이 있으면 이름 옆에 판 수를 붙인다.
+                string name = summary.MissedRuns > 0 ? $"{summary.Name} ✗{summary.MissedRuns}판" : summary.Name;
+                GUILayout.Label(new GUIContent(name, MissedRunsTooltip), GUILayout.Width(StrategyWidth));
                 GUILayout.Label($"{summary.HeroCount:N1}", GUILayout.Width(FacilityWidth));
                 GUILayout.Label($"{summary.DpsMean:N1} ({summary.DpsMin:N1}~{summary.DpsMax:N1})", GUILayout.Width(CompareNumberWidth + FacilityWidth));
                 GUILayout.Label($"{summary.HpMean:N0}", GUILayout.Width(CompareNumberWidth));
